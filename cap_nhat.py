@@ -130,10 +130,11 @@ def is_protected(rel: str) -> bool:
 
 
 def file_hash(paths) -> str:
+    # Bỏ qua khác biệt CRLF/LF: zip từ GitHub là LF, bản cài từ zip cũ có thể là CRLF
     h = hashlib.sha256()
     for p in paths:
         f = ROOT_DIR / p
-        h.update(f.read_bytes() if f.exists() else b'')
+        h.update(f.read_bytes().replace(b'\r\n', b'\n') if f.exists() else b'')
     return h.hexdigest()
 
 
