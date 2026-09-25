@@ -67,16 +67,21 @@ class UpdateError(Exception):
 # ---------------------------------------------------------------------------
 # GitHub
 # ---------------------------------------------------------------------------
+def clean_token(text: str) -> str:
+    # Token GitHub chỉ gồm chữ, số, "_"; bỏ BOM của Notepad, dấu cách, dấu nháy lỡ dán vào
+    return re.sub(r'[^A-Za-z0-9_]', '', text or '')
+
+
 def get_token() -> str:
-    token = os.environ.get('GITHUB_TOKEN', '').strip()
+    token = clean_token(os.environ.get('GITHUB_TOKEN', ''))
     if token:
         return token
     if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text(encoding='utf-8').strip()
+        token = clean_token(TOKEN_FILE.read_text(encoding='utf-8', errors='ignore'))
         if token:
             return token
     print('   Máy này chưa có mã cập nhật (token GitHub). Xin quản lý rồi dán vào đây.')
-    token = input('   Token: ').strip()
+    token = clean_token(input('   Token: '))
     if not token:
         raise UpdateError('Chưa nhập token.')
     TOKEN_FILE.write_text(token, encoding='utf-8')
