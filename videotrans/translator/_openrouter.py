@@ -8,7 +8,8 @@ class OpenRouter(OpenAICampat):
 
     def __post_init__(self):
         self.ainame ='openrouter'
-        self.max_tokens =int(params.get('openrouter_max_tokens',8192))
+        # 界面保存的键名是 openrouter_max_token，此前误读为复数导致设置始终不生效
+        self.max_tokens =int(float(params.get('openrouter_max_token',8192)))
         self.model_name = params.get('openrouter_model', "")
         self.api_url = 'https://openrouter.ai/api/v1'
         self.api_key = params.get('openrouter_key', '')

@@ -1,0 +1,119 @@
+{
+  "_comment": "Cau hinh cho dub_all.py. Doi giong doc / font / style tai day, khong can sua code.",
+  "source_language": "en",
+  "translate_type": 6,
+  "tts_type": 0,
+  "subtitle_type": 1,
+  "voice_autorate": true,
+  "video_autorate": false,
+  "cuda": false,
+
+  "_giu_nhac_note": "is_separate=true: tach nhac nen + SFX ra khoi giong noi goc roi long tieng moi de len tren, giu nguyen nhac va tieng dong. Chi tach 1 lan cho ca loat.",
+  "is_separate": true,
+  "backaudio_volume": 0.5,
+  "_backaudio_volume_note": "Do to cua nhac nen duoi giong doc. Nhac nho qua thi tang len 1.2-1.6, nhac at giong thi ha xuong 0.4-0.6.",
+  "uvr_model": "UVR-MDX-NET-Inst_HQ_4",
+  "_uvr_model_note": "UVR-MDX-NET-Inst_HQ_4 giu nhac sach hon nhung nang hon. Doi thanh spleeter neu may yeu hoac tai model that bai.",
+
+  "_translate_parallel_note": "So ngon ngu dich cung luc o pha 1. Dich chi la cho API nen chay song song nhanh gan nhu gap N lan. Ha xuong 2-3 neu nha cung cap bao loi 429 / gioi han tan suat, dat 1 de quay ve chay lan luot. Khong anh huong pha 2 (long tieng/render) vi pha do an CPU/GPU.",
+  "translate_parallel": 3,
+
+  "voice_rate": "+0%",
+  "volume": "+0%",
+  "pitch": "+0Hz",
+  "sleep_between": 5,
+  "retries": 2,
+
+  "_cleanup_note": "Xoa thu muc out/<ma> sau khi da co video trong final/ (video trong final/ khong bi anh huong vi dung hardlink).",
+  "cleanup_out": true,
+
+  "_am_luong_note": "Chuan hoa am luong ve chuan YouTube (-14 LUFS) sau khi render. Chi ma hoa lai audio, video giu nguyen.",
+  "normalize_audio": true,
+  "loudnorm_i": -14,
+  "loudnorm_tp": -1.5,
+  "loudnorm_lra": 11,
+
+  "_translate_type_note": "0=Google (mien phi) | 5=DeepSeek chinh hang | 6=Gemini AI (can project Google Cloud da bat Billing, xem HUONG_DAN_LONG_TIENG.md) | 10=OpenRouter (dang dung) | xem day du: uv run cli.py --list providers",
+
+  "subtitle_style": {
+    "_note": "Don vi theo PlayRes 384x288 ma ffmpeg sinh ra khi doi SRT->ASS. Nhan 3.75 de ra pixel o 1080p.",
+    "base": {
+      "Name": "Default",
+      "Fontname": "Segoe UI",
+      "Fontsize": 17,
+      "PrimaryColour": "&H00FFFFFF",
+      "SecondaryColour": "&H00FFFFFF",
+      "OutlineColour": "&H00000000",
+      "BackColour": "&H96000000",
+      "Bold": 1,
+      "Italic": 0,
+      "Underline": 0,
+      "StrikeOut": 0,
+      "ScaleX": 100,
+      "ScaleY": 100,
+      "Spacing": 0,
+      "Angle": 0,
+      "BorderStyle": 1,
+      "Outline": 1.6,
+      "Shadow": 0.8,
+      "Alignment": 2,
+      "MarginL": 34,
+      "MarginR": 34,
+      "MarginV": 26,
+      "Encoding": 1
+    },
+    "fonts": {
+      "default": "Segoe UI",
+      "ar": "Segoe UI",
+      "hi": "Nirmala UI",
+      "zh-tw": "Microsoft JhengHei UI",
+      "ja": "Yu Gothic UI",
+      "ko": "Malgun Gothic",
+      "th": "Leelawadee UI"
+    },
+    "_maxlen_note": "Dat rieng theo ma ngon ngu se duoc uu tien hon cjk/default. Tieng Thai nam trong nhom CJK cua pyvideotrans nhung chu Thai hep gan bang chu Latin nen dung 32 thay vi 15.",
+    "maxlen": {
+      "default": 36,
+      "cjk": 15,
+      "th": 32
+    },
+    "overrides": {
+      "_note": "Ghi de rieng tung ngon ngu, vi du {\"ja\": {\"Fontsize\": 16}}"
+    }
+  },
+
+  "_original_video_note": "Them 1 video thanh pham tu video goc: giu nguyen hinh + tieng goc, chi nhung phu de goc (cung style voi cac ban long tieng). Dat enabled=false de tat. Khi chay --langs thi phai ghi them ma goc (vd: en,ar) moi lam.",
+  "original_video": {
+    "enabled": true,
+    "name": "Anh (gốc)"
+  },
+
+  "_languages_note":"Ten trong 'name' duoc dung de dat ten file video xuat ra. Bo tieng Anh vi do la ngon ngu goc.",
+  "languages": [
+    { "code": "ar",     "name": "Ả Rập",           "voice": "ar-EG-SalmaNeural" },
+    { "code": "de",     "name": "Đức",             "voice": "de-DE-KatjaNeural" },
+    { "code": "es",     "name": "Tây Ban Nha",     "voice": "es-ES-ElviraNeural" },
+    { "code": "fr",     "name": "Pháp",            "voice": "fr-FR-DeniseNeural" },
+    { "code": "it",     "name": "Ý",               "voice": "it-IT-ElsaNeural" },
+    { "code": "ja",     "name": "Nhật",            "voice": "ja-JP-NanamiNeural" },
+    { "code": "ko",     "name": "Hàn",             "voice": "ko-KR-SunHiNeural" },
+    { "code": "pt",     "name": "Bồ Đào Nha",      "voice": "pt-BR-FranciscaNeural" },
+    { "code": "ru",     "name": "Nga",             "voice": "ru-RU-SvetlanaNeural" },
+    { "code": "tr",     "name": "Thổ Nhĩ Kỳ",      "voice": "tr-TR-EmelNeural" },
+    { "code": "hi",     "name": "Ấn Độ",           "voice": "hi-IN-SwaraNeural" },
+    { "code": "zh-tw",  "name": "Trung phồn thể",  "voice": "zh-TW-HsiaoChenNeural" },
+    { "code": "id",     "name": "Indonesia",       "voice": "id-ID-GadisNeural" },
+    { "code": "nl",     "name": "Hà Lan",          "voice": "nl-NL-ColetteNeural" },
+    { "code": "pl",     "name": "Ba Lan",          "voice": "pl-PL-ZofiaNeural" },
+    { "code": "sv",     "name": "Thụy Điển",       "voice": "sv-SE-SofieNeural" },
+    { "code": "ro",     "name": "Romania",         "voice": "ro-RO-AlinaNeural" },
+    { "code": "uk",     "name": "Ukraine",         "voice": "uk-UA-PolinaNeural" },
+    { "code": "fi",     "name": "Phần Lan",        "voice": "fi-FI-NooraNeural" },
+    { "code": "da",     "name": "Đan Mạch",        "voice": "da-DK-ChristelNeural" },
+    { "code": "fil",    "name": "Philippines",     "voice": "fil-PH-BlessicaNeural" },
+    { "code": "ms",     "name": "Mã Lai",          "voice": "ms-MY-YasminNeural" },
+    { "code": "el",     "name": "Hy Lạp",          "voice": "el-GR-AthinaNeural" },
+    { "code": "cs",     "name": "Séc",             "voice": "cs-CZ-VlastaNeural" },
+    { "code": "th",     "name": "Thái Lan",        "voice": "th-TH-PremwadeeNeural" }
+  ]
+}

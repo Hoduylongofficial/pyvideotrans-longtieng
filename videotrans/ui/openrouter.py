@@ -130,7 +130,11 @@ class Ui_openrouterform(object):
         self.edit_allmodels.setPlainText(allmodels_str)
 
         self.openrouter_key.setText(str(params.get("openrouter_key",'')))
-        self.openrouter_model.setCurrentText(params.get("openrouter_model",''))
+        # 已保存的模型不在列表中时补进去，否则 setCurrentText 无效，点保存会被列表第一项覆盖
+        _cur_model = str(params.get("openrouter_model", '')).strip()
+        if _cur_model and _cur_model not in allmodels:
+            self.openrouter_model.insertItem(0, _cur_model)
+        self.openrouter_model.setCurrentText(_cur_model)
         self.max_token.setText(str(params.get("openrouter_max_token",'')))
         self.reasoning_effort.setCurrentText(params.get("openrouter_reasoning_effort","No"))
 

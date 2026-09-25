@@ -138,6 +138,8 @@ class AppSettings:
             "noise_separate_nums": 4,
             "aitrans_temperature": 0.1,
             "aitrans_context": False,
+            # 单次翻译请求超时秒数；aitrans_context=True 一次性翻译全部字幕时耗时远超默认 300s
+            "llm_timeout": 300,
             "batch_nums": 0,
             "ai302_models": Ai302_Models,
             'qwenmt_model': Qwenmt_Model,

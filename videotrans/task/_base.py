@@ -94,6 +94,22 @@ class BaseTask(BaseCon):
         target_len = len(target_srt_list)
         if source_len == target_len:
             logger.debug(f'原始语言字幕和目标语言字幕行数一致，均为 {source_len=}')
+            # 行数一致时第 i 行必然对应原始第 i 行，强制套用原始时间轴。
+            # AI 渠道按块翻译时，个别块可能返回自己编造的时间戳（例如最后一块从 00:00:01 重新开始），
+            # 行数恰好相等就会被原样写入字幕文件，导致整段字幕错位。
+            _fixed = 0
+            for i, it in enumerate(target_srt_list):
+                src = source_srt_list[i]
+                if it['time'] != src['time']:
+                    _fixed += 1
+                it['line'] = src['line']
+                it['time'] = src['time']
+                it['start_time'] = src['start_time']
+                it['end_time'] = src['end_time']
+                it['startraw'] = src['startraw']
+                it['endraw'] = src['endraw']
+            if _fixed > 0:
+                logger.warning(f'翻译结果中有 {_fixed} 行时间轴与原始字幕不符，已按原始字幕时间轴强制修正')
             return target_srt_list
 
         logger.warning(f'翻译结果行数{target_len}，原始字幕行数{source_len}，不一致,根据原始字幕时间轴获取对应目标字幕文本')

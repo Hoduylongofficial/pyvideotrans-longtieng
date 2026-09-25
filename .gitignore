@@ -61,3 +61,14 @@ guide/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Bo long tieng: .bat cua minh duoc dua len GitHub, token + ban dong goi thi khong
+!LONG_TIENG.bat
+!MO_PHAN_MEM.bat
+!DOI_MODEL.bat
+!CAP_NHAT.bat
+update_token.txt
+.phienban
+*.capnhat
+pyvideotrans-longtieng*.zip
+_dich_thu/

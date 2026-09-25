@@ -24,9 +24,11 @@ class SubtitleMixin:
                 self.cfg.subtitle_type = 2
 
         process_end_subtitle = self.cfg.cache_folder + f'/end.srt'
+        # 环境变量可为单次任务覆盖每行最大字符数，未设置则用全局设置
         maxlen = int(
-            settings.get('cjk_len', 15) if self.cfg.target_language_code[:2] in contants.CJK_LANG else
-            settings.get('other_len', 60))
+            os.environ.get('PYVIDEOTRANS_SUB_MAXLEN') or
+            (settings.get('cjk_len', 15) if self.cfg.target_language_code[:2] in contants.CJK_LANG else
+             settings.get('other_len', 60)))
         target_sub_list = get_subtitle_from_srt(self.cfg.target_sub)
 
         srt_string = ""

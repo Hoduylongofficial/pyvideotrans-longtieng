@@ -30,7 +30,8 @@ def set_ass_font(srtfile: str) -> str:
     ass_file_path = f'{srtfile[:-3]}ass'
     help_ffmpeg.runffmpeg(['-y', '-i', edit_srt, ass_file_path])
 
-    JSON_FILE = f'{ROOT_DIR}/videotrans/ass.json'
+    # 允许通过环境变量为单次任务指定样式文件（如每种语言使用不同字体），未设置则用全局 ass.json
+    JSON_FILE = os.environ.get('PYVIDEOTRANS_ASS_JSON') or f'{ROOT_DIR}/videotrans/ass.json'
     if not os.path.exists(JSON_FILE):
         logger.debug(f"[set_ass_font] 未修改硬字幕样式，跳过样式替换")
         return ass_file_path

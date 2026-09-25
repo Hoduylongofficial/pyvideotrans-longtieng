@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Union
-from openai import OpenAI, LengthFinishReasonError,NotFoundError, AuthenticationError, PermissionDeniedError,BadRequestError,APIConnectionError,APIError
+from openai import OpenAI, LengthFinishReasonError,NotFoundError, AuthenticationError, PermissionDeniedError,BadRequestError,APIConnectionError,APIError,APIStatusError
 from tenacity import before_log, retry_if_not_exception_type, wait_fixed, stop_after_attempt, after_log, retry
 
 from videotrans.configure.excepts import NO_RETRY_EXCEPT, TranslateSrtError, LLMSegmentError, StopTask
@@ -41,6 +42,15 @@ class OpenAICampat(BaseTrans):
         except (ValueError,TypeError) as e:
             logger.error(f'当前渠道{self.ainame}设置的最大输出tokens错误，应填写整数，实际填写的是`{self.max_tokens}`\n{e}')
             self.max_tokens=8192
+        # 随机起点，多个进程并行翻译时不会都挤在第一个 key 上
+        self._key_offset = random.randrange(1000)
+
+    def _rotated_keys(self) -> List[str]:
+        keys = [k.strip() for k in str(self.api_key or '').split(',') if k.strip()] or [self.api_key]
+        offset = getattr(self, '_key_offset', 0)
+        start = offset % len(keys)
+        self._key_offset = offset + 1
+        return keys[start:] + keys[:start]
 
     @retry(retry=retry_if_not_exception_type(NO_RETRY_EXCEPT), stop=(stop_after_attempt(settings.get('retry_nums'))), wait=wait_fixed(2), before=before_log(logger, logging.INFO),after=after_log(logger, logging.INFO))
     def _item_task(self, data: Union[List[str], str]) -> str:
@@ -63,7 +73,7 @@ class OpenAICampat(BaseTrans):
 
         kwargs={
             "model":self.model_name,
-            "timeout":300,
+            "timeout":int(settings.get('llm_timeout', 300)),
             "temperature":float(self.temperature)            
         }
         # 针对 openai 官方或 GPT模型，使用 max_completion_tokens 参数，其他第三方使用 max_tokens 参数            
@@ -79,8 +89,17 @@ class OpenAICampat(BaseTrans):
         kwargs["messages"]=message
         
         try:
-            model = OpenAI(api_key=self.api_key, base_url=self.api_url)
-            response = model.chat.completions.create(**kwargs, extra_body=self.extra_body)
+            # 支持多个 key（逗号分隔）：轮询使用，某个 key 被限流/额度用完/失效时换下一个
+            keys = self._rotated_keys()
+            for n, api_key in enumerate(keys):
+                try:
+                    model = OpenAI(api_key=api_key, base_url=self.api_url)
+                    response = model.chat.completions.create(**kwargs, extra_body=self.extra_body)
+                    break
+                except APIStatusError as e:
+                    if n == len(keys) - 1 or e.status_code not in (401, 402, 403, 429):
+                        raise
+                    logger.warning(f'[{self.ainame}] key ...{api_key[-4:]} 返回 {e.status_code}，换下一个 key')
         except APIConnectionError as e:
             raise StopTask(f'[{self.ainame}] {tr("Unable to connect to API",self.api_url)}\n{e.message}') from e
         except (NotFoundError,AuthenticationError,PermissionDeniedError,BadRequestError) as e:

@@ -369,6 +369,8 @@
     "Subtitles/srt": "Subtitle File (.srt)",
     "Succeed": "Success",
     "Swedish": "Swedish",
+    "Finnish": "Finnish",
+    "Danish": "Danish",
     "TTS": "TTS Service",
     "TTS API": "Custom TTS API",
     "Target format": "Target Format",

@@ -369,6 +369,8 @@
     "Subtitles/srt": "字幕文件/srt",
     "Succeed": "执行成功",
     "Swedish": "瑞典语",
+    "Finnish": "芬兰语",
+    "Danish": "丹麦语",
     "TTS": "配音渠道",
     "TTS API": "自定义TTS API",
     "Target format": "要转换到的格式",

@@ -49,6 +49,8 @@ LANGNAME_DICT = {
     "yue": tr("Cantonese"),
     "km": tr("Khmer"),  # 高棉
     "ro": tr("Romanian"),  # 罗马尼亚
+    "fi": tr("Finnish"),  # 芬兰
+    "da": tr("Danish"),  # 丹麦
 }
 
 # 如果存在新增
@@ -117,6 +119,32 @@ LANG_CODE = {
         "ro",  # 阿里
         "Romanian",# qwen-mt
         "ro"  # m2m100
+    ],
+    "fi": [
+        "fi",  # google通道
+        "fin",  # 字幕嵌入语言
+        "fin",  # 百度通道
+        "FI",  # deepl deeplx通道
+        "No",  # 腾讯通道
+        "fi",  # OTT通道
+        "fi",  # 微软翻译
+        "Finnish",  # AI翻译
+        "fi",  # 阿里
+        "Finnish",  # qwen-mt
+        "fi"  # m2m100
+    ],
+    "da": [
+        "da",  # google通道
+        "dan",  # 字幕嵌入语言
+        "dan",  # 百度通道
+        "DA",  # deepl deeplx通道
+        "No",  # 腾讯通道
+        "da",  # OTT通道
+        "da",  # 微软翻译
+        "Danish",  # AI翻译
+        "da",  # 阿里
+        "Danish",  # qwen-mt
+        "da"  # m2m100
     ],
     "km": [
         "km",  # google通道

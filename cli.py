@@ -13,6 +13,10 @@ Usage examples:
 
   # Full video translation
   uv run cli.py --task vtv --name "E:/movies/clip.mp4" --source_language_code zh-cn --target_language_code en --voice_role "en-US-GuyNeural" --cuda
+
+  # Dubbing only, reusing subtitles you already have (skips STT and translation)
+  uv run cli.py --task vtv --name "E:/movies/clip.mp4" --source_language_code en --target_language_code de \
+      --source_srt "E:/subs/en.srt" --target_srt "E:/subs/de.srt" --voice_role "de-DE-KatjaNeural"
 """
 
 import asyncio
@@ -123,11 +127,25 @@ TEXT_DB: Dict[str, Dict[str, str]] = {
     "help_translate_type": {"zh": "翻译渠道编号", "en": "Translation provider index"},
     "help_source_lang":   {"zh": "源语言代码 (STS默认auto, VTV必选)", "en": "Source language (auto for STS, required for VTV)"},
     "help_target_lang":   {"zh": "目标语言代码 (必选)", "en": "Target language (required)"},
+    "help_source_srt": {
+        "zh": "已有的源语言字幕文件,将跳过语音识别",
+        "en": "Existing source-language SRT; skips speech recognition"
+    },
+    "help_target_srt": {
+        "zh": "已有的目标语言字幕文件,将跳过字幕翻译",
+        "en": "Existing target-language SRT; skips subtitle translation"
+    },
+    "srt_use_source": {"zh": "[复用字幕] 源语言字幕 -> {}", "en": "[Reuse SRT] source subtitle -> {}"},
+    "srt_use_target": {"zh": "[复用字幕] 目标语言字幕 -> {}", "en": "[Reuse SRT] target subtitle -> {}"},
 
     # --- VTV extra params ---
     "group_vtv":           {"zh": "VTV (视频翻译) 额外参数", "en": "VTV Extra Parameters"},
     "help_video_autorate": {"zh": "自动慢速视频以对齐字幕", "en": "Auto-slow video to match subtitles"},
     "help_is_separate":    {"zh": "分离人声背景声", "en": "Separate vocals and background"},
+    "help_backaudio_volume": {
+        "zh": "重新嵌入的背景声音量倍数 (默认 0.8)",
+        "en": "Volume multiplier for the re-embedded background audio (default 0.8)"
+    },
     "help_recogn2pass":    {"zh": "二次语音识别", "en": "Enable 2-pass recognition"},
     "help_subtitle_type":  {"zh": "字幕类型 (0=无, 1=硬, 2=软, 3=硬双, 4=软双)", "en": "Subtitle type (0=None, 1=Hard, 2=Soft, 3=Hard Dual, 4=Soft Dual)"},
     "help_clear_cache":    {"zh": "完成后清理缓存 (默认)", "en": "Clear cache after finish (default)"},
@@ -250,7 +268,31 @@ def sts_fun(params: dict) -> None:
         raise
 
 
-def vtv_fun(params: dict) -> None:
+def _place_existing_srt(trk, source_srt: Optional[str], target_srt: Optional[str]) -> None:
+    """Copy user-supplied subtitles into the task output dir so stages reuse them.
+
+    An existing source-language srt makes RecognMixin.recogn() skip speech
+    recognition, an existing target-language srt makes TranslateMixin.trans()
+    skip translation. Must run after TransCreate.__post_init__ (which wipes
+    target_dir when clear_cache is on) and before prepare().
+    """
+    import shutil
+
+    Path(trk.cfg.target_dir).mkdir(parents=True, exist_ok=True)
+    for srt_file, dest, msg_key in (
+        (source_srt, trk.cfg.source_sub, 'srt_use_source'),
+        (target_srt, trk.cfg.target_sub, 'srt_use_target'),
+    ):
+        if not srt_file:
+            continue
+        src_path, dest_path = Path(srt_file).absolute(), Path(dest)
+        if src_path == dest_path or (dest_path.exists() and src_path.samefile(dest_path)):
+            continue
+        shutil.copy2(src_path, dest_path)
+        print(tr(msg_key, dest))
+
+
+def vtv_fun(params: dict, source_srt: Optional[str] = None, target_srt: Optional[str] = None) -> None:
     """Execute full video translation task."""
     from videotrans.configure.config import app_cfg
     from videotrans.task.trans_create import TransCreate
@@ -261,6 +303,7 @@ def vtv_fun(params: dict) -> None:
     print(tr('process_file', params.get('name')))
     try:
         trk = TransCreate(cfg=TaskCfgVTT(**params))
+        _place_existing_srt(trk, source_srt, target_srt)
         trk.prepare()
         trk.recogn()
         trk.diariz()
@@ -368,11 +411,14 @@ def build_parser() -> argparse.ArgumentParser:
     trans_group.add_argument('--translate_type', type=int, default=0, help=tr("help_translate_type"))
     trans_group.add_argument('--source_language_code', type=str, default=None, help=tr("help_source_lang"))
     trans_group.add_argument('--target_language_code', type=str, default=None, help=tr("help_target_lang"))
+    trans_group.add_argument('--source_srt', type=str, default=None, help=tr("help_source_srt"))
+    trans_group.add_argument('--target_srt', type=str, default=None, help=tr("help_target_srt"))
 
     # --- VTV extra ---
     vtv_group = parser.add_argument_group(tr("group_vtv"))
     vtv_group.add_argument('--video_autorate', action='store_true', help=tr("help_video_autorate"))
     vtv_group.add_argument('--is_separate', action='store_true', help=tr("help_is_separate"))
+    vtv_group.add_argument('--backaudio_volume', type=float, default=0.8, help=tr("help_backaudio_volume"))
     vtv_group.add_argument('--recogn2pass', action='store_true', help=tr("help_recogn2pass"))
     vtv_group.add_argument('--subtitle_type', type=int, default=1, help=tr("help_subtitle_type"))
     vtv_group.add_argument('--clear_cache', action='store_true', default=True, help=tr("help_clear_cache"))
@@ -391,6 +437,10 @@ def validate_task_params(args: argparse.Namespace, parser: argparse.ArgumentPars
 
     if not Path(args.name).exists():
         parser.error(tr("err_file_not_found", args.name))
+
+    for srt_file in (args.source_srt, args.target_srt):
+        if srt_file and not Path(srt_file).exists():
+            parser.error(tr("err_file_not_found", srt_file))
 
     if args.task == 'tts' and not args.voice_role:
         parser.error(tr("err_tts_role_required"))
@@ -481,12 +531,17 @@ def build_vtv_params(args: argparse.Namespace) -> dict:
     return {
         "source_language_code": args.source_language_code,
         "target_language_code": args.target_language_code,
+        # 显示名称，get_subtitle_code() 据此确定嵌入字幕的3位语言代码
+        "source_language": args.source_language_code,
+        "target_language": args.target_language_code,
         **build_stt_params(args),
         **{k: v for k, v in build_tts_params(args).items()
            if k not in ('target_language_code', 'is_cuda')},
         "is_cuda": args.cuda,
         "translate_type": args.translate_type,
+        "video_autorate": args.video_autorate,
         "is_separate": args.is_separate,
+        "backaudio_volume": args.backaudio_volume,
         "recogn2pass": args.recogn2pass,
         "subtitle_type": args.subtitle_type,
         "clear_cache": args.clear_cache,
@@ -568,7 +623,8 @@ def main() -> int:
         'stt': lambda: stt_fun({**common_params, **build_stt_params(args)}),
         'tts': lambda: tts_fun({**common_params, **build_tts_params(args)}),
         'sts': lambda: sts_fun({**common_params, **build_sts_params(args)}),
-        'vtv': lambda: vtv_fun({**common_params, **build_vtv_params(args)}),
+        'vtv': lambda: vtv_fun({**common_params, **build_vtv_params(args)},
+                               source_srt=args.source_srt, target_srt=args.target_srt),
     }
 
     try:

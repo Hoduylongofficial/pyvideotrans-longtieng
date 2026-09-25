@@ -1,4 +1,4 @@
-import time,re,json,shutil
+import os,time,re,json,shutil
 from pathlib import Path
 
 from videotrans.configure.config import tr, app_cfg, settings, logger
@@ -205,7 +205,8 @@ class PrepareMixin:
         from videotrans.util.help_down import down_file_from_hf
         from videotrans.util.help_misc import is_connect_hf
         title = tr('Separating vocals and background music, which may take a longer time')
-        uvr_models = settings.get('uvr_models')
+        # 环境变量可为单次任务指定分离模型，未设置则用全局设置
+        uvr_models = os.environ.get('PYVIDEOTRANS_UVR_MODEL') or settings.get('uvr_models')
         URL_PREFIX= UVR_URL_MS if not is_connect_hf() else UVR_URL_HF
         
         if uvr_models.startswith('spleeter'):

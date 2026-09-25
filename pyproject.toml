@@ -302,6 +302,9 @@ override-dependencies = [
 	"google-cloud-storage==3.12.0",
 	"torchcodec ; sys_platform == 'never'",
 	"pythonnet ; sys_platform == 'win32'",
+	# chatterbox-tts 要求从 git 安装 resemble-perth，需要本机装 Git 且能连通 GitHub。
+	# PyPI 上有同版本 1.0.1 的纯 Python wheel，改从 PyPI 取，安装时不再需要 Git。
+	"resemble-perth==1.0.1",
 ]
 
 index-strategy = "unsafe-best-match"
