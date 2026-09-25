@@ -3,7 +3,6 @@ rem ===========================================================
 rem  CAP NHAT bo long tieng len ban moi nhat tren GitHub
 rem
 rem  Cach dung: dong MO_PHAN_MEM / LONG_TIENG, roi bam dup file nay.
-rem  Lan dau se hoi token GitHub (xin quan ly), cac lan sau tu chay.
 rem  API key, cau hinh rieng cua may nay duoc giu nguyen.
 rem ===========================================================
 rem Toan bo lenh nam trong 1 khoi ( ) de cmd doc het truoc khi chay:

@@ -96,14 +96,17 @@ Bấm đúp `DOI_MODEL.bat` → chọn số trong menu (đóng `MO_PHAN_MEM` và
 ### 1.5c Cập nhật bản mới: `CAP_NHAT.bat`
 
 Đóng `MO_PHAN_MEM` / `LONG_TIENG`, bấm đúp `CAP_NHAT.bat`. Nó tải bản mới nhất từ repo
-GitHub private `Hoduylongofficial/pyvideotrans-longtieng`, chỉ ghi đè code, **giữ
-nguyên** API key (`videotrans/params.json`), `videotrans/cfg.json`, kênh dịch + số dịch
-song song đã chọn trong `dub_all.config.json`. Thư viện thay đổi thì tự chạy `uv sync`.
+GitHub `Hoduylongofficial/pyvideotrans-longtieng` (public, không cần đăng nhập hay
+token), chỉ ghi đè code, **giữ nguyên** API key (`videotrans/params.json`),
+`videotrans/cfg.json`, kênh dịch + số dịch song song đã chọn trong
+`dub_all.config.json`. Thư viện thay đổi thì tự chạy `uv sync`.
 
-- Lần đầu nó hỏi **token GitHub** (lưu vào `update_token.txt`). Token do quản lý tạo:
-  github.com → Settings → Developer settings → Fine-grained tokens → Generate new
-  token → *Only select repositories*: `pyvideotrans-longtieng` → *Permissions*:
-  **Contents: Read-only**. Token hết hạn thì xoá `update_token.txt` rồi dán token mới.
+- Repo public nên **không bao giờ** được commit API key. `params.json`, `cfg.json`,
+  `update_token.txt` đã nằm trong `.gitignore`.
+- Nếu sau này chuyển repo về private thì `CAP_NHAT.bat` tự hỏi token GitHub (lưu vào
+  `update_token.txt`). Token tạo ở github.com → Settings → Developer settings →
+  Fine-grained tokens → *Only select repositories*: `pyvideotrans-longtieng` →
+  *Permissions*: **Contents: Read-only**.
 - Quản lý sửa code xong chỉ cần commit + `git push origin main`; nhân viên bấm
   `CAP_NHAT.bat` là có. Dòng đầu của commit message hiện ra cho nhân viên đọc.
 

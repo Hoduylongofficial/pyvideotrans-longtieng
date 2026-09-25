@@ -8,7 +8,6 @@ Từ đó dùng LONG_TIENG.bat như thường
 
 Cập nhật khi quản lý sửa code:
 Đóng MO_PHAN_MEM / LONG_TIENG, bấm đúp CAP_NHAT.bat.
-Lần đầu nó hỏi token GitHub — xin quản lý rồi dán vào (chỉ hỏi 1 lần).
 API key và kênh dịch đã chọn trên máy được giữ nguyên.
 
 Đổi model / thêm API key: bấm đúp DOI_MODEL.bat (xem mục 1.5b trong HUONG_DAN_LONG_TIENG.md)

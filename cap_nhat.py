@@ -72,15 +72,20 @@ def clean_token(text: str) -> str:
     return re.sub(r'[^A-Za-z0-9_]', '', text or '')
 
 
-def get_token() -> str:
+class AuthError(UpdateError):
+    pass
+
+
+def saved_token() -> str:
     token = clean_token(os.environ.get('GITHUB_TOKEN', ''))
-    if token:
-        return token
-    if TOKEN_FILE.exists():
+    if not token and TOKEN_FILE.exists():
         token = clean_token(TOKEN_FILE.read_text(encoding='utf-8', errors='ignore'))
-        if token:
-            return token
-    print('   Máy này chưa có mã cập nhật (token GitHub). Xin quản lý rồi dán vào đây.')
+    return token
+
+
+def ask_token() -> str:
+    print('   Repo trên GitHub đang để riêng tư nên cần mã cập nhật (token GitHub).')
+    print('   Xin quản lý rồi dán vào đây.')
     token = clean_token(input('   Token: '))
     if not token:
         raise UpdateError('Chưa nhập token.')
@@ -89,24 +94,39 @@ def get_token() -> str:
 
 
 def github(url: str, token: str, raw: bool = False):
-    req = urllib.request.Request(url, headers={
-        'Authorization': f'Bearer {token}',
+    headers = {
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
         'User-Agent': 'pyvideotrans-longtieng-updater',
-    })
+    }
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=300) as resp:
             data = resp.read()
     except urllib.error.HTTPError as e:
+        if e.headers.get('X-RateLimit-Remaining') == '0':
+            raise UpdateError('GitHub đang giới hạn số lượt tải từ mạng này. Thử lại sau 1 tiếng.') from e
         if e.code in (401, 403, 404):
-            raise UpdateError(
+            raise AuthError(
                 f'GitHub từ chối ({e.code}). Token sai, hết hạn hoặc không có quyền đọc repo.\n'
                 f'   Xin token mới từ quản lý, xoá file update_token.txt rồi chạy lại.') from e
         raise UpdateError(f'GitHub lỗi {e.code}: {e.reason}') from e
     except urllib.error.URLError as e:
         raise UpdateError(f'Không kết nối được GitHub: {e.reason}') from e
     return data if raw else json.loads(data)
+
+
+def latest_commit() -> tuple:
+    """(commit mới nhất, token dùng được). Repo public thì không cần token."""
+    url = f'{API}/commits/{BRANCH}'
+    for token in dict.fromkeys([saved_token(), '']):
+        try:
+            return github(url, token), token
+        except AuthError:
+            pass
+    token = ask_token()
+    return github(url, token), token
 
 
 def changes_since(old: str, new: str, token: str) -> tuple:
@@ -207,9 +227,8 @@ def main() -> int:
     print('   CẬP NHẬT BỘ LỒNG TIẾNG')
     print('=' * 62)
     try:
-        token = get_token()
         print('   Đang kiểm tra bản mới trên GitHub...')
-        latest = github(f'{API}/commits/{BRANCH}', token)
+        latest, token = latest_commit()
         new_sha = latest['sha']
         old_sha = VERSION_FILE.read_text(encoding='utf-8').strip() if VERSION_FILE.exists() else ''
         if old_sha == new_sha:
