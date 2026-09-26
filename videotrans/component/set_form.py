@@ -84,6 +84,7 @@ _LAZY_FORMS = {
     "OpenAITTSForm": ("QDialogBase", "videotrans.ui.openaitts", "Ui_openaittsform"),
     "OpenaiRecognAPIForm": ("QDialogBase", "videotrans.ui.openairecognapi", "Ui_openairecognapiform"),
     "OpenrouterForm": ("QDialogBase", "videotrans.ui.openrouter", "Ui_openrouterform"),
+    "NineRouterForm": ("QDialogBase", "videotrans.ui.ninerouter", "Ui_ninerouterform"),
     "ParakeetForm": ("QDialogBase", "videotrans.ui.parakeet", "Ui_parakeetform"),
     "Peiyinform": ("QWidgetBase", "videotrans.ui.peiyin", "Ui_peiyin"),
     "QwenTTSForm": ("QDialogBase", "videotrans.ui.qwentts", "Ui_qwenttsform"),

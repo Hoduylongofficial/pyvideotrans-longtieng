@@ -134,6 +134,12 @@ class AppParams:
             "openrouter_reasoning_effort": "No",
             "openrouter_model": str(_settings.get('openrouter_model', '-')).strip().split(',')[0],
             "openrouter_max_token": 16384,#最大输出16k
+            # 9Router：自建的 OpenAI 兼容网关（https://<域名>/v1），可把多个账号/Key 合并成一个接口
+            "ninerouter_api": "",
+            "ninerouter_key": "",
+            "ninerouter_model": str(_settings.get('ninerouter_model', '')).strip().split(',')[0],
+            "ninerouter_max_token": 8192,
+            "ninerouter_reasoning_effort": "No",
             "huoshan_max_token": 32768,#最大输出32k
             "zijiehuoshan_key": "",
             "huoshan_thinking": False,

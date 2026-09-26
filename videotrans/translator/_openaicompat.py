@@ -52,6 +52,31 @@ class OpenAICampat(BaseTrans):
         self._key_offset = offset + 1
         return keys[start:] + keys[:start]
 
+    def _model_chain(self) -> List[str]:
+        # 模型可填多个（逗号分隔）：按顺序使用，前一个 404/429/余额不足等失败时自动换下一个
+        models = [m.strip() for m in str(self.model_name or '').split(',') if m.strip()] or [self.model_name]
+        dead = getattr(self, '_dead_models', set())
+        # 404/400 类（模型不存在、渠道已关闭）本次任务内不再尝试；全部失效时仍按原顺序重试
+        return [m for m in models if m not in dead] or models
+
+    @staticmethod
+    def _can_try_next_model(e: APIStatusError) -> bool:
+        if re.search(r"insufficient.*?balance|quota|rate.?limit|credit", str(e.message), flags=re.I):
+            return True
+        return e.status_code in (400, 402, 403, 404, 408, 409, 429) or e.status_code >= 500
+
+    def _create_with_keys(self, kwargs):
+        # 支持多个 key（逗号分隔）：轮询使用，某个 key 被限流/额度用完/失效时换下一个
+        keys = self._rotated_keys()
+        for n, api_key in enumerate(keys):
+            try:
+                model = OpenAI(api_key=api_key, base_url=self.api_url)
+                return model.chat.completions.create(**kwargs, extra_body=self.extra_body)
+            except APIStatusError as e:
+                if n == len(keys) - 1 or e.status_code not in (401, 402, 403, 429):
+                    raise
+                logger.warning(f'[{self.ainame}] key ...{api_key[-4:]} 返回 {e.status_code}，换下一个 key')
+
     @retry(retry=retry_if_not_exception_type(NO_RETRY_EXCEPT), stop=(stop_after_attempt(settings.get('retry_nums'))), wait=wait_fixed(2), before=before_log(logger, logging.INFO),after=after_log(logger, logging.INFO))
     def _item_task(self, data: Union[List[str], str]) -> str:
         if self._exit(): return
@@ -71,13 +96,14 @@ class OpenAICampat(BaseTrans):
         ]
 
 
+        models = self._model_chain()
         kwargs={
-            "model":self.model_name,
+            "model":models[0],
             "timeout":int(settings.get('llm_timeout', 300)),
             "temperature":float(self.temperature)            
         }
         # 针对 openai 官方或 GPT模型，使用 max_completion_tokens 参数，其他第三方使用 max_tokens 参数            
-        if "api.openai.com" in self.api_url or (self.ainame=='chatgpt' and re.match(r'^(gpt|o\d)', self.model_name, flags=re.I)):
+        if "api.openai.com" in self.api_url or (self.ainame=='chatgpt' and re.match(r'^(gpt|o\d)', models[0], flags=re.I)):
             kwargs["max_completion_tokens"]=int(self.max_tokens)
         else:
             kwargs["max_tokens"]=int(self.max_tokens)
@@ -89,17 +115,19 @@ class OpenAICampat(BaseTrans):
         kwargs["messages"]=message
         
         try:
-            # 支持多个 key（逗号分隔）：轮询使用，某个 key 被限流/额度用完/失效时换下一个
-            keys = self._rotated_keys()
-            for n, api_key in enumerate(keys):
+            for mi, model_name in enumerate(models):
+                kwargs["model"] = model_name
                 try:
-                    model = OpenAI(api_key=api_key, base_url=self.api_url)
-                    response = model.chat.completions.create(**kwargs, extra_body=self.extra_body)
+                    response = self._create_with_keys(kwargs)
                     break
                 except APIStatusError as e:
-                    if n == len(keys) - 1 or e.status_code not in (401, 402, 403, 429):
+                    if mi == len(models) - 1 or not self._can_try_next_model(e):
                         raise
-                    logger.warning(f'[{self.ainame}] key ...{api_key[-4:]} 返回 {e.status_code}，换下一个 key')
+                    if e.status_code in (400, 404):
+                        self._dead_models = getattr(self, '_dead_models', set()) | {model_name}
+                    msg = (e.body.get('message') if isinstance(e.body, dict) else None) or e.message
+                    logger.warning(f'[{self.ainame}] 模型 {model_name} 返回 {e.status_code}: {msg}，改用下一个模型 {models[mi + 1]}')
+                    self.signal(text=f'[{self.ainame}] {model_name} lỗi {e.status_code}, chuyển sang {models[mi + 1]}')
         except APIConnectionError as e:
             raise StopTask(f'[{self.ainame}] {tr("Unable to connect to API",self.api_url)}\n{e.message}') from e
         except (NotFoundError,AuthenticationError,PermissionDeniedError,BadRequestError) as e:

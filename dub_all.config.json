@@ -33,7 +33,7 @@
   "loudnorm_tp": -1.5,
   "loudnorm_lra": 11,
 
-  "_translate_type_note": "0=Google (mien phi) | 5=DeepSeek chinh hang | 6=Gemini AI (can project Google Cloud da bat Billing, xem HUONG_DAN_LONG_TIENG.md) | 10=OpenRouter (dang dung) | xem day du: uv run cli.py --list providers",
+  "_translate_type_note": "0=Google (mien phi) | 5=DeepSeek chinh hang | 6=Gemini AI (can project Google Cloud da bat Billing, xem HUONG_DAN_LONG_TIENG.md) | 10=OpenRouter | 25=9Router (VPS rieng, doi bang DOI_MODEL.bat muc 10) | xem day du: uv run cli.py --list providers",
 
   "subtitle_style": {
     "_note": "Don vi theo PlayRes 384x288 ma ffmpeg sinh ra khi doi SRT->ASS. Nhan 3.75 de ra pixel o 1080p.",

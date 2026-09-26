@@ -79,6 +79,7 @@ Bấm đúp `DOI_MODEL.bat` → chọn số trong menu (đóng `MO_PHAN_MEM` và
 | 2 | OpenRouter model miễn phí — tự lấy danh sách model `:free` mới nhất để chọn |
 | 3 | Gemini (Google AI Studio) |
 | 4 / 5 | DeepSeek chính hãng / Google Dịch miễn phí |
+| 10 | 9Router trên VPS riêng — nhập URL (dạng `https://.../v1`) + key `sk-...`, tự lấy danh sách model để chọn |
 | 6 | Thêm / xoá API key — dán được nhiều key một lần |
 | 7 | Kiểm tra từng key với model đang chọn (OK / lỗi + lý do) |
 | 8 | Dịch thử 1 file `.srt` sang 1 ngôn ngữ, ra thư mục `_dich_thu` cạnh file srt (tên file có tên model để so sánh) |
@@ -92,6 +93,15 @@ Bấm đúp `DOI_MODEL.bat` → chọn số trong menu (đóng `MO_PHAN_MEM` và
 - Chọn model free thì tool hỏi đặt dịch song song = 1; quay về trả phí thì hỏi đặt lại 4.
 - `LONG_TIENG.bat` bỏ qua ngôn ngữ đã dịch trong `subs/`. Muốn dịch lại bằng model mới
   thì dùng mục 8, hoặc xoá file `subs/<mã>.srt` tương ứng.
+
+- **9Router** (kênh số 25): gộp nhiều tài khoản Claude / Gemini / DeepSeek / OpenRouter
+  trên VPS thành 1 API. URL + key lấy ở mục *Endpoint & Key* trên dashboard 9Router.
+  Trong phần mềm: menu kênh dịch → **9Router** → nhập URL, key → bấm
+  *Lấy danh sách model* → chọn model (hoặc gõ tên combo) → *Test* → *Lưu*.
+- Ô model của 9Router nhận **nhiều model cách nhau dấu phẩy**, theo thứ tự ưu tiên, vd
+  `ag/claude-sonnet-4-6,gemini/gemini-3.6-flash,ds/deepseek-v4-flash`. Model đầu bị lỗi
+  404 (nhà cung cấp đã tắt), 429 (hết lượt), hết tiền, tên sai hoặc lỗi máy chủ thì tự
+  chuyển sang model sau. Trong `DOI_MODEL.bat` mục 10 chọn nhiều số, vd `2,15,30`.
 
 ### 1.5c Cập nhật bản mới: `CAP_NHAT.bat`
 

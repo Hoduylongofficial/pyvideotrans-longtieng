@@ -47,7 +47,7 @@ PAID_OPENROUTER_MODEL = 'deepseek/deepseek-v4.1-flash'
 PAID_PARALLEL = 4
 FREE_PARALLEL = 1
 
-OPENROUTER, GEMINI, DEEPSEEK, GOOGLE = 10, 6, 5, 0
+OPENROUTER, GEMINI, DEEPSEEK, GOOGLE, NINEROUTER = 10, 6, 5, 0, 25
 CHANNELS = {
     OPENROUTER: {'name': 'OpenRouter', 'key': 'openrouter_key', 'model': 'openrouter_model',
                  'prefix': ('sk-or-',)},
@@ -56,7 +56,10 @@ CHANNELS = {
     DEEPSEEK: {'name': 'DeepSeek chính hãng', 'key': 'deepseek_key', 'model': 'deepseek_model',
                'prefix': ('sk-',)},
     GOOGLE: {'name': 'Google Dịch (miễn phí)', 'key': None, 'model': None, 'prefix': ()},
+    NINEROUTER: {'name': '9Router (VPS riêng)', 'key': 'ninerouter_key', 'model': 'ninerouter_model',
+                 'prefix': ('sk-',)},
 }
+KEY_CHANNELS = [OPENROUTER, GEMINI, DEEPSEEK, NINEROUTER]
 GEMINI_EXTRA_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
 TEST_TEXT = 'Please subscribe to the channel. Investing involves risk; this is not financial advice.'
 
@@ -116,6 +119,19 @@ def current_model(params: dict, channel: int) -> str:
     return str(params.get(model_key, '')) if model_key else '-'
 
 
+def ninerouter_url(url: str) -> str:
+    """Chuẩn hoá URL 9Router về dạng https://<tên miền>/v1 (giống videotrans/translator/_ninerouter.py)."""
+    url = str(url or '').strip().strip('"').strip("'").rstrip('/')
+    if not url:
+        return ''
+    if not url.startswith('http'):
+        url = 'https://' + url
+    url = re.sub(r'/chat/completions$', '', url)
+    if not re.search(r'/v\d+$', url):
+        url += '/v1'
+    return url
+
+
 def mask(key: str) -> str:
     return key if len(key) <= 12 else f'{key[:6]}…{key[-4:]}'
 
@@ -155,6 +171,8 @@ def show_status() -> None:
     if t in CHANNELS and CHANNELS[t]['model']:
         print(f'   Model               : {current_model(params, t)}')
         print(f'   Số API key          : {len(get_keys(params, t))}')
+    if t == NINEROUTER:
+        print(f'   URL 9Router         : {params.get("ninerouter_api") or "(chưa nhập)"}')
     print(f'   Dịch song song      : {cfg.get("translate_parallel", 4)} ngôn ngữ cùng lúc')
 
 
@@ -238,12 +256,62 @@ def choose_gemini() -> str | None:
     return None if not ans or ans.isdigit() else ans
 
 
+def choose_ninerouter() -> str | None:
+    import httpx
+    params = read_json(PARAMS_JSON)
+    url = str(params.get('ninerouter_api', '') or '')
+    print('\n   9Router gộp Claude / Gemini / DeepSeek / OpenRouter... thành 1 API.')
+    print('   URL + key lấy ở mục "Endpoint & Key" trên dashboard 9Router.')
+    ans = ask(f'   URL 9Router [Enter = {url or "chưa có"}]: ')
+    if ans:
+        url = ninerouter_url(ans)
+    if not url:
+        print('   Chưa có URL, huỷ.')
+        return None
+    params['ninerouter_api'] = url
+    write_json(PARAMS_JSON, params)
+    print(f'   URL: {url}')
+    if not get_keys(params, NINEROUTER):
+        print('   Chưa có key 9Router (dạng sk-...).')
+        add_keys(NINEROUTER)
+    keys = get_keys(read_json(PARAMS_JSON), NINEROUTER)
+
+    print('\n   Đang lấy danh sách model từ 9Router...')
+    models = []
+    try:
+        resp = httpx.get(f'{url}/models', timeout=30,
+                         headers={'Authorization': f'Bearer {keys[0]}'} if keys else None)
+        resp.raise_for_status()
+        models = sorted({m['id'] for m in resp.json().get('data', []) if m.get('id')})
+    except Exception as e:  # noqa: BLE001
+        print(f'   Không lấy được danh sách ({e}).')
+
+    if models:
+        kw = ask('   Gõ từ khoá để lọc (vd: claude, gemini, deepseek) hoặc Enter để xem hết: ').lower()
+        shown = [m for m in models if kw in m.lower()] or models
+        for i, m in enumerate(shown, 1):
+            print(f'   {i:>3}) {m}')
+        print('\n   Chọn nhiều số theo thứ tự ưu tiên (vd: 2,15,30): model đầu bị lỗi')
+        print('   404 / 429 / hết tiền thì phần mềm tự chuyển sang model tiếp theo.')
+        ans = ask('   Nhập số, hoặc gõ tên model (nhiều model cách nhau dấu phẩy), Enter để huỷ: ')
+        parts = [a for a in re.split(r'[\s,;]+', ans) if a]
+        if parts and all(a.isdigit() for a in parts):
+            picked = [shown[int(a) - 1] for a in parts if 1 <= int(a) <= len(shown)]
+            return ','.join(dict.fromkeys(picked)) or None
+    else:
+        ans = ask('   Gõ tên model (nhiều model cách nhau dấu phẩy), Enter để huỷ: ')
+    parts = [a for a in re.split(r'[\s,;]+', ans) if a]
+    if not parts or any(a.isdigit() for a in parts):
+        return None
+    return ','.join(dict.fromkeys(parts))
+
+
 # ---------------------------------------------------------------------------
 # Quản lý key
 # ---------------------------------------------------------------------------
 def pick_channel(prompt: str) -> int | None:
     t = int(dub_cfg().get('translate_type', 0))
-    options = [OPENROUTER, GEMINI, DEEPSEEK]
+    options = KEY_CHANNELS
     print()
     for i, c in enumerate(options, 1):
         star = '  <- đang dùng' if c == t else ''
@@ -345,11 +413,13 @@ def test_one(channel: int, model: str, key: str, params: dict) -> tuple:
             return False, f'{e.code} {e.message}', time.time() - started, e.code
     import httpx
     from openai import OpenAI, APIStatusError, APIConnectionError
-    base = 'https://openrouter.ai/api/v1' if channel == OPENROUTER else 'https://api.deepseek.com/v1'
+    base = {OPENROUTER: 'https://openrouter.ai/api/v1',
+            NINEROUTER: ninerouter_url(params.get('ninerouter_api', ''))}.get(channel, 'https://api.deepseek.com/v1')
     kwargs = {'model': model, 'messages': [{'role': 'user', 'content': prompt}], 'timeout': 120}
-    if channel == OPENROUTER:
-        kwargs['max_tokens'] = int(float(params.get('openrouter_max_token', 8192)))
-        effort = params.get('openrouter_reasoning_effort')
+    if channel in (OPENROUTER, NINEROUTER):
+        prefix = 'openrouter' if channel == OPENROUTER else 'ninerouter'
+        kwargs['max_tokens'] = int(float(params.get(f'{prefix}_max_token', 8192) or 8192))
+        effort = params.get(f'{prefix}_reasoning_effort')
         if effort and effort != 'No':
             kwargs['reasoning_effort'] = effort
     else:
@@ -373,26 +443,31 @@ def test_one(channel: int, model: str, key: str, params: dict) -> tuple:
 def run_test() -> None:
     cfg, params = dub_cfg(), read_json(PARAMS_JSON)
     channel = int(cfg.get('translate_type', 0))
-    if channel not in (OPENROUTER, GEMINI, DEEPSEEK):
+    if channel not in KEY_CHANNELS:
         print('\n   Kênh đang dùng không cần key, không có gì để kiểm tra.')
         return
     model, keys = current_model(params, channel), get_keys(params, channel)
     if not keys:
         print('\n   Chưa có key nào. Vào mục 6 để thêm.')
         return
-    print(f'\n   Kiểm tra {CHANNELS[channel]["name"]} · {model} · {len(keys)} key')
-    ok = 0
-    for i, key in enumerate(keys, 1):
-        good, text, secs, code = test_one(channel, model, key, params)
-        status = 'OK ' if good else 'LỖI'
-        print(f'\n   [{i}] {mask(key)} — {status} ({secs:.1f}s)')
-        print(f'       {text[:300]}')
-        if not good:
-            hint = explain_error(code, text)
-            if hint:
-                print(f'       => {hint}')
-        ok += good
-    print(f'\n   Kết quả: {ok}/{len(keys)} key dùng được.')
+    # Ô model có thể là chuỗi nhiều model (lỗi thì phần mềm chuyển model sau): kiểm tra từng cái
+    models = [m.strip() for m in model.split(',') if m.strip()] or [model]
+    if len(models) > 1:
+        print(f'\n   Chuỗi model (lỗi thì tự chuyển sang model sau): {" -> ".join(models)}')
+    for model in models:
+        print(f'\n   Kiểm tra {CHANNELS[channel]["name"]} · {model} · {len(keys)} key')
+        ok = 0
+        for i, key in enumerate(keys, 1):
+            good, text, secs, code = test_one(channel, model, key, params)
+            status = 'OK ' if good else 'LỖI'
+            print(f'\n   [{i}] {mask(key)} — {status} ({secs:.1f}s)')
+            print(f'       {text[:300]}')
+            if not good:
+                hint = explain_error(code, text)
+                if hint:
+                    print(f'       => {hint}')
+            ok += good
+        print(f'\n   Kết quả {model}: {ok}/{len(keys)} key dùng được.')
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +486,8 @@ def trial_translate() -> None:
     code = ask(f'   Dịch sang mã ngôn ngữ nào ({", ".join(codes)}) [Enter = ja]: ') or 'ja'
 
     model = current_model(params, channel) if CHANNELS.get(channel, {}).get('model') else 'google'
-    slug = re.sub(r'[^A-Za-z0-9.-]+', '_', model).strip('_')
+    # Chuỗi nhiều model: tên file lấy theo model đầu cho gọn
+    slug = re.sub(r'[^A-Za-z0-9.-]+', '_', model.split(',')[0]).strip('_')
     out_dir = srt.parent / '_dich_thu'
     out_dir.mkdir(exist_ok=True)
     produced = out_dir / f'{srt.stem}.{code}.srt'
@@ -462,6 +538,7 @@ def main() -> int:
         print('   3) Gemini — Google AI Studio (key free)')
         print('   4) DeepSeek chính hãng (dự phòng khi hết tiền OpenRouter)')
         print('   5) Google Dịch miễn phí (không cần key, chất lượng thấp hơn)')
+        print('  10) 9Router trên VPS riêng (gộp Claude / Gemini / DeepSeek / OpenRouter)')
         print('   ' + '-' * 40)
         print('   6) Thêm / xoá API key (dán được nhiều key)')
         print('   7) Kiểm tra key + model đang dùng')
@@ -485,6 +562,10 @@ def main() -> int:
             switch(DEEPSEEK, None, free=False)
         elif choice == '5':
             switch(GOOGLE, None, free=True)
+        elif choice == '10':
+            model = choose_ninerouter()
+            if model:
+                switch(NINEROUTER, model, free=False)
         elif choice == '6':
             manage_keys()
         elif choice == '7':

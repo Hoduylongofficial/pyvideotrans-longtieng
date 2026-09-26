@@ -218,11 +218,17 @@ def openwin():
         elif idx == translator.ZIJIE_INDEX:
             model_list = settings.get('zijiehuoshan_model','').strip().split(',')
             current_model = params["zijiehuoshan_model"]
+        elif idx == translator.NINEROUTER_INDEX:
+            model_list = settings.get('ninerouter_model','').strip().split(',')
+            current_model = params["ninerouter_model"]
 
         else:
             winobj.fanyi_model_list.setVisible(False)
             return
 
+        # 已保存的值不在列表里（如 9Router 逗号分隔的多个模型）时补到最前，否则 clear/addItems 触发 model_change 会被第一项覆盖
+        if current_model and current_model not in model_list:
+            model_list.insert(0, current_model)
         winobj.fanyi_model_list.clear()
         winobj.fanyi_model_list.addItems(model_list)
         if current_model in model_list:
@@ -243,6 +249,8 @@ def openwin():
             params["azure_model"] = model_name
         elif idx == translator.ZIJIE_INDEX:
             params["zijiehuoshan_model"] = model_name
+        elif idx == translator.NINEROUTER_INDEX:
+            params["ninerouter_model"] = model_name
 
         params.save()
 

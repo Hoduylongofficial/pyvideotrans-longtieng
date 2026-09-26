@@ -152,6 +152,7 @@ class AppSettings:
             "deepseek_model": Deepseek_Model,
             "xiaomi_model": XIAOMI_MODELS,
             "openrouter_model": Openrouter_Model,
+            "ninerouter_model": "",
             "guiji_model": Guiji_Model,
             "zijiehuoshan_model": Zijiehuoshan_Model,
             "model_list": Whisper_Models,
