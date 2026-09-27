@@ -2,6 +2,7 @@
 import logging
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,13 +66,36 @@ class OpenAICampat(BaseTrans):
             return True
         return e.status_code in (400, 402, 403, 404, 408, 409, 429) or e.status_code >= 500
 
+    def _with_deadline(self, fn, seconds: float, model_name: str):
+        # openai 的 timeout 只限制两次收到数据之间的间隔。OpenRouter 等在模型生成期间
+        # 每 3 秒发送保活字节，上游卡住时请求会无限挂起，所以这里限制总时长。
+        # 用 daemon 线程：超时后放弃该请求，进程退出时不会等待它
+        box = {}
+
+        def run():
+            try:
+                box['result'] = fn()
+            except BaseException as e:  # noqa: BLE001 - 转交给调用线程
+                box['error'] = e
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(seconds)
+        if t.is_alive():
+            raise TranslateSrtError(f'[{self.ainame}] {model_name} no response after {int(seconds)}s: {self.api_url}')
+        if 'error' in box:
+            raise box['error']
+        return box['result']
+
     def _create_with_keys(self, kwargs):
         # 支持多个 key（逗号分隔）：轮询使用，某个 key 被限流/额度用完/失效时换下一个
         keys = self._rotated_keys()
         for n, api_key in enumerate(keys):
             try:
                 model = OpenAI(api_key=api_key, base_url=self.api_url)
-                return model.chat.completions.create(**kwargs, extra_body=self.extra_body)
+                return self._with_deadline(
+                    lambda: model.chat.completions.create(**kwargs, extra_body=self.extra_body),
+                    kwargs['timeout'], kwargs['model'])
             except APIStatusError as e:
                 if n == len(keys) - 1 or e.status_code not in (401, 402, 403, 429):
                     raise

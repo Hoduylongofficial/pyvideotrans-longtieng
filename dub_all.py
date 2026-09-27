@@ -280,14 +280,26 @@ def validate(cfg: dict, langs: list, video: Path, srt: Path, log: Log) -> None:
 # Chạy cli.py
 # ---------------------------------------------------------------------------
 _SRT_INDEX = re.compile(r'^\s*\d+\s*$')
+STALLED_RC = -999  # run_cli trả về mã này khi phải giết tiến trình vì treo
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    if sys.platform == 'win32':
+        subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        proc.kill()
 
 
 def run_cli(cli_args: list, log: Log, task_log: Path, env: dict | None = None,
-            quiet: bool = False) -> int:
+            quiet: bool = False, stall_timeout: float | None = None) -> int:
     """Chạy cli.py, ghi toàn bộ output vào task_log, chỉ hiện dòng có ích lên màn hình.
 
     quiet=True: chỉ ghi vào task_log, không in ra màn hình. Dùng khi dịch song song
     nhiều ngôn ngữ, vì output của các tiến trình sẽ chèn lẫn vào nhau không đọc được.
+
+    stall_timeout: số giây không có dòng output nào thì coi là treo (API không trả lời),
+    giết tiến trình và trả về STALLED_RC để attempt() chạy lại.
     """
     cmd = [sys.executable, str(CLI_PY)] + cli_args
     run_env = os.environ.copy()
@@ -301,7 +313,21 @@ def run_cli(cli_args: list, log: Log, task_log: Path, env: dict | None = None,
         proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=run_env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, encoding='utf-8', errors='replace',
                                 bufsize=1)
+        last_output = [time.monotonic()]
+        stalled = threading.Event()
+
+        def watchdog():
+            while proc.poll() is None:
+                if time.monotonic() - last_output[0] > stall_timeout:
+                    stalled.set()
+                    _kill_tree(proc)
+                    return
+                time.sleep(5)
+
+        if stall_timeout:
+            threading.Thread(target=watchdog, daemon=True).start()
         for line in proc.stdout:
+            last_output[0] = time.monotonic()
             fh.write(line)
             if quiet:
                 continue
@@ -316,11 +342,15 @@ def run_cli(cli_args: list, log: Log, task_log: Path, env: dict | None = None,
                 continue
             print(f'    {text}', flush=True)
         proc.wait()
+        if stalled.is_set():
+            fh.write(f'\n[dub_all] {int(stall_timeout)}s không có output — đã dừng tiến trình vì treo\n')
+            return STALLED_RC
     return proc.returncode
 
 
 def attempt(cfg: dict, log: Log, head: str, task_log: Path, cli_args: list,
-            succeeded, env: dict | None = None, quiet: bool = False) -> bool:
+            succeeded, env: dict | None = None, quiet: bool = False,
+            stall_timeout: float | None = None) -> bool:
     """Chạy cli.py, thử lại vài lần nếu hỏng.
 
     Cần thiết cho chạy không người trông: model dịch thỉnh thoảng trả về rỗng,
@@ -328,9 +358,11 @@ def attempt(cfg: dict, log: Log, head: str, task_log: Path, cli_args: list,
     """
     attempts = max(1, int(cfg.get('retries', 2)))
     for n in range(1, attempts + 1):
-        rc = run_cli(cli_args, log, task_log, env=env, quiet=quiet)
+        rc = run_cli(cli_args, log, task_log, env=env, quiet=quiet, stall_timeout=stall_timeout)
         if rc == 0 and succeeded():
             return True
+        if rc == STALLED_RC:
+            log(f'{head} — treo {int(stall_timeout // 60)} phút không phản hồi (API dịch không trả lời), đã dừng')
         if n < attempts:
             log(f'{head} — hỏng lần {n}/{attempts}, thử lại sau 10s...')
             time.sleep(10)
@@ -353,6 +385,8 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
 
     targets = [l for l in langs if l['code'] != source_language]
     total = len(targets)
+    # Mỗi request dịch tối đa llm_timeout (300s) x vài lần thử lại; im lặng lâu hơn thế là treo
+    stall_timeout = float(cfg.get('translate_stall_minutes', 20)) * 60 or None
 
     def translate_one(i: int, lang: dict, quiet: bool) -> tuple:
         code = lang['code']
@@ -377,7 +411,7 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         try:
             done = attempt(cfg, log, head, logs_dir / f'translate-{code}.log', cli_args,
                            lambda: produced.exists() and produced.stat().st_size > 0,
-                           quiet=quiet)
+                           quiet=quiet, stall_timeout=stall_timeout)
         except Exception as e:  # noqa: BLE001 - một ngôn ngữ hỏng không được làm sập cả loạt
             log(f'{head} — LỖI: {e}')
             return code, 'failed'

@@ -50,6 +50,9 @@ class Gemini(BaseTrans):
                     logger.warning(f'[Gemini] key ...{api_key[-4:]} 返回 {e.code}，换下一个 key')
         except httpx.ConnectTimeout as e:
             raise StopTask(f' {tr("Unable to connect to remote API","Gemini AI")}\n{e}') from e
+        except httpx.TimeoutException as e:
+            # 服务器过载时流式响应可能卡住不返回数据，超时后报错而不是无限等待
+            raise TranslateSrtError(f'[Gemini] timeout {settings.get("llm_timeout", 300)}s: {e!r}') from e
         except errors.APIError as e:
             logger.warning(f'{e=}')
             if e.code in [400,403,404,429,500]:
@@ -62,6 +65,10 @@ class Gemini(BaseTrans):
             http_options = types.HttpOptions(
                 client_args={'proxy': self.proxy_str},
                 async_client_args={'proxy': self.proxy_str},
+                # 默认无超时：服务器过载时请求可能永远挂起。单位毫秒
+                timeout=int(settings.get('llm_timeout', 300)) * 1000,
+                # 503 "high demand" 等临时错误按指数退避重试；429 不在此列，交给上面的换 key 逻辑
+                retry_options=types.HttpRetryOptions(attempts=5, http_status_codes=[500, 502, 503, 504]),
             )
 
         )
