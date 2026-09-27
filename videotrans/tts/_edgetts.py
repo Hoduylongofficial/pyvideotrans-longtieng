@@ -16,7 +16,8 @@ from videotrans.tts._base import BaseTTS
 from videotrans.util.help_misc import vail_file
 from videotrans.util.help_role import get_edge_rolelist
 
-MAX_CONCURRENT_TASKS = int(settings.get('edgetts_max_concurrent_tasks',10))
+# dub_all.py 通过环境变量覆盖并发数：并发 10 时实测约 40% 的句子被限流返回 NoAudioReceived
+MAX_CONCURRENT_TASKS = int(os.environ.get('PYVIDEOTRANS_EDGETTS_CONCURRENCY') or settings.get('edgetts_max_concurrent_tasks',10))
 RETRY_NUMS = int(settings.get('edgetts_retry_nums',3))+1
 RETRY_DELAY = 5
 POLL_INTERVAL = 0.1
@@ -208,8 +209,19 @@ class EdgeTTS(BaseTTS):
                     f"预期任务数: {total_tasks}, 实际完成数: {final_count}."
                     f"丢失了 {total_tasks - final_count} 个任务的状态。"
                     "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-                )        
-            
+                )
+
+            # 补救：并发时被限流而失败的句子，逐句再配一次，否则成品里这些句子没有声音
+            missing = [it for it in self.queue_tts
+                       if it.get('text', '').strip() and not vail_file(it['filename'])
+                       and not vail_file(it['filename'] + ".mp3")]
+            if missing and not self._exit() and not self._stop_event.is_set():
+                logger.warning(f'EdgeTTS: {len(missing)} 句失败，逐句重新配音')
+                self.ends_counter = 0
+                rescue = asyncio.Semaphore(1)
+                for i, item in enumerate(missing):
+                    await self._create_audio_with_retry(item, i, len(missing), rescue)
+
 
             ok, err = 0, 0
             for i, item in enumerate(self.queue_tts):

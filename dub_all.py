@@ -548,7 +548,8 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
                          '--backaudio_volume', str(cfg.get('backaudio_volume', 0.8))]
 
         env = {'PYVIDEOTRANS_ASS_JSON': str(style_file),
-               'PYVIDEOTRANS_SUB_MAXLEN': str(maxlen_for(cfg, code))}
+               'PYVIDEOTRANS_SUB_MAXLEN': str(maxlen_for(cfg, code)),
+               'PYVIDEOTRANS_EDGETTS_CONCURRENCY': str(max(1, int(cfg.get('tts_concurrency', 3))))}
         if is_separate and cfg.get('uvr_model'):
             env['PYVIDEOTRANS_UVR_MODEL'] = str(cfg['uvr_model'])
 

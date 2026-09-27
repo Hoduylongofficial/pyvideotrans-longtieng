@@ -25,6 +25,8 @@
   "pitch": "+0Hz",
   "sleep_between": 5,
   "retries": 2,
+  "_tts_concurrency_note": "So cau Edge-TTS doc cung luc. Microsoft chan khi goi don dap: 10 cau cung luc thi ~40% cau hong. Cau hong van duoc doc lai tung cau mot sau do.",
+  "tts_concurrency": 3,
 
   "_cleanup_note": "Xoa thu muc out/<ma> sau khi da co video trong final/ (video trong final/ khong bi anh huong vi dung hardlink).",
   "cleanup_out": true,
