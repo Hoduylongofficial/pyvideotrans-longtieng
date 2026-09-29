@@ -56,6 +56,8 @@ EDGE_VOICE_JSON = ROOT_DIR / 'videotrans' / 'voicejson' / 'edge_tts.json'
 PARAMS_JSON = ROOT_DIR / 'videotrans' / 'params.json'
 
 EDGE_TTS = 0
+OMNIVOICE_TTS = 3
+TTS_LABELS = {EDGE_TTS: 'Edge-TTS', OMNIVOICE_TTS: 'OmniVoice (GPU thuê Modal, nhái giọng)'}
 VIDEO_EXTS = ('.mp4', '.mkv', '.mov', '.webm', '.avi')
 # Giữ đồng bộ với videotrans.configure.contants.CJK_LANG
 CJK_LANG = ('zh', 'ja', 'ko', 'yu', 'th', 'km', 'yue')
@@ -241,6 +243,13 @@ def validate(cfg: dict, langs: list, video: Path, srt: Path, log: Log) -> None:
             if lang['voice'] not in pool.values():
                 errors.append(f'[{lang["code"]}] giọng đọc "{lang["voice"]}" '
                               f'không có trong Edge-TTS')
+    elif int(cfg.get('tts_type')) == OMNIVOICE_TTS:
+        params = json.loads(PARAMS_JSON.read_text(encoding='utf-8-sig'))
+        if not (str(params.get('omnivoice_modal_url', '')).strip() and str(params.get('omnivoice_modal_key', '')).strip()):
+            errors.append('OmniVoice chưa có URL + key GPU Modal. Nhập bằng DOI_TTS.bat mục 2.')
+        ref = str(params.get('omnivoice_ref_wav', '') or '').strip()
+        if ref and not (Path(ref) if Path(ref).is_absolute() else ROOT_DIR / ref).is_file():
+            errors.append(f'Không thấy file giọng mẫu OmniVoice: {ref}. Chọn lại bằng DOI_TTS.bat mục 3.')
 
     # Font — chỉ cảnh báo, fontconfig vẫn có thể thay thế được
     families = installed_font_families()
@@ -477,6 +486,65 @@ def harvest_separated_audio(sep_dir: Path, lang_out: Path) -> None:
             shutil.move(str(produced), str(master))
 
 
+def auto_render_parallel() -> tuple:
+    """Số video render cùng lúc hợp với máy: (số, lý do). Render nặng CPU/RAM, máy yếu làm nhiều sẽ lỗi/treo."""
+    try:
+        import psutil
+        cores = psutil.cpu_count(logical=False) or os.cpu_count() or 2
+        ram = psutil.virtual_memory().total / 2 ** 30
+    except Exception:  # noqa: BLE001
+        cores, ram = os.cpu_count() or 2, 8.0
+    nvidia = shutil.which('nvidia-smi') is not None
+    info = f'{cores} nhân CPU, {ram:.0f} GB RAM, {"có" if nvidia else "không có"} card NVIDIA'
+    if ram < 12 or cores < 4:
+        return 1, info
+    if nvidia:  # render bằng NVENC trên card, CPU chỉ ghép tiếng/phụ đề
+        return min(3, max(1, cores // 4)), info
+    return (2 if cores >= 6 and ram >= 16 else 1), info
+
+
+def render_parallel(cfg: dict, log=None) -> int:
+    value = str(cfg.get('dub_parallel', 'auto')).strip().lower()
+    if value.isdigit() and int(value) >= 1:
+        return int(value)
+    n, info = auto_render_parallel()
+    if log:
+        log(f'  Máy này: {info} -> render {n} video cùng lúc (dub_parallel = auto)')
+    return n
+
+
+def phase_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
+                       store: Path, log: Log) -> None:
+    """OmniVoice + giọng mẫu cố định: tạo sẵn giọng mọi ngôn ngữ trên GPU Modal, nhiều lượt cùng lúc.
+
+    GPU chạy liền 1 mạch rồi tắt (ít lần khởi động, không ngồi chờ máy này render), sau đó bước
+    render lấy giọng từ kho, không gọi Modal nữa. Nhái từng câu từ video thì không tạo sẵn được
+    (giọng mẫu cắt từ video trong lúc lồng tiếng) -> đọc trong lúc lồng tiếng như cũ.
+    """
+    if int(cfg.get('tts_type', EDGE_TTS)) != OMNIVOICE_TTS:
+        return
+    from videotrans.tts._omnivoice_modal import fixed_ref, prefetch, remote_configured
+    from videotrans.util.help_srt import get_subtitle_from_srt
+    if not remote_configured() or not fixed_ref():
+        return
+    jobs = {}
+    for lang in langs:
+        sub = subs_dir / f'{lang["code"]}.srt'
+        if find_final_video(final_dir, lang, video.stem) or not sub.exists():
+            continue
+        # Giống hệt cách _stage_dubbing lấy câu để đọc -> kho khớp đúng từng câu lúc render
+        jobs[lang['code']] = [it['text'] for it in get_subtitle_from_srt(str(sub))
+                              if it['end_time'] >= it['start_time'] and it['text'].strip()]
+    if not jobs:
+        return
+    started = time.time()
+    native = {l['code'] for l in langs if str(l.get('omnivoice_voice', '')).lower() == 'native'}
+    res = prefetch(store, jobs, parallel=max(1, int(cfg.get('tts_prefetch_parallel', 10))), log=log,
+                   native=native & set(jobs))
+    done = sum(v[0] for v in res.values())
+    log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, {len(res)} ngôn ngữ')
+
+
 def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path,
               final_dir: Path, style_dir: Path, log: Log, logs_dir: Path) -> dict:
     source_language = cfg.get('source_language', 'en')
@@ -490,14 +558,13 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
         log('  Giữ nhạc nền + SFX: sẽ tách nhạc khỏi giọng nói ở ngôn ngữ đầu tiên')
         log('  (chỉ tách 1 lần cho cả loạt, có thể mất vài phút với video dài)')
 
-    for i, lang in enumerate(langs, start=1):
+    def dub_one(i: int, lang: dict, quiet: bool) -> tuple:
         code = lang['code']
         head = f'  [{i}/{len(langs)}] {code:<6} {lang.get("name", "")}'
         lang_out = out_dir / code
         if find_final_video(final_dir, lang, video.stem):
             log(f'{head} — đã hoàn thành, bỏ qua')
-            results[code] = 'skipped'
-            continue
+            return code, 'skipped'
         # Còn sót từ lần chạy bị ngắt giữa chừng: chỉ cần hoàn tất nốt
         leftover = find_output_video(lang_out, video.stem)
         if leftover:
@@ -505,14 +572,12 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
             if is_separate:
                 harvest_separated_audio(sep_dir, lang_out)
             finalize(cfg, log, head, leftover, lang_out, final_dir, lang, video.stem)
-            results[code] = 'skipped'
-            continue
+            return code, 'skipped'
 
         target_sub = subs_dir / f'{code}.srt'
         if code != source_language and not (target_sub.exists() and target_sub.stat().st_size > 0):
             log(f'{head} — LỖI: thiếu phụ đề {target_sub.name}, bỏ qua')
-            results[code] = 'failed'
-            continue
+            return code, 'failed'
 
         style_file = style_dir / f'{code}.json'
         style_file.write_text(json.dumps(style_for(cfg, code), ensure_ascii=False, indent=2),
@@ -527,7 +592,10 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
             '--target_language_code', code,
             '--source_srt', str(source_sub),
             '--tts_type', str(cfg.get('tts_type', EDGE_TTS)),
-            '--voice_role', lang['voice'],
+            # Edge-TTS: giọng riêng từng ngôn ngữ. TTS chạy trên máy (OmniVoice...): "clone" =
+            # nhái giọng người nói, mỗi câu lấy đúng đoạn gốc trong video làm giọng mẫu
+            '--voice_role', lang['voice'] if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS
+            else cfg.get('local_tts_voice', 'clone'),
             '--voice_rate', cfg.get('voice_rate', '+0%'),
             '--volume', cfg.get('volume', '+0%'),
             '--pitch', cfg.get('pitch', '+0Hz'),
@@ -549,14 +617,20 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
 
         env = {'PYVIDEOTRANS_ASS_JSON': str(style_file),
                'PYVIDEOTRANS_SUB_MAXLEN': str(maxlen_for(cfg, code)),
-               'PYVIDEOTRANS_EDGETTS_CONCURRENCY': str(max(1, int(cfg.get('tts_concurrency', 3))))}
+               'PYVIDEOTRANS_EDGETTS_CONCURRENCY': str(max(1, int(cfg.get('tts_concurrency', 3)))),
+               # kho giọng OmniVoice tạo sẵn (phase_tts_prefetch) — trúng thì không gọi Modal nữa
+               'PYVIDEOTRANS_OMNIVOICE_STORE': str(out_dir.parent / '_tts'),
+               # "omnivoice_voice": "native" trong languages: giọng bản xứ thay cho giọng mẫu tiếng Anh
+               'PYVIDEOTRANS_OMNIVOICE_VOICE': str(lang.get('omnivoice_voice', ''))}
         if is_separate and cfg.get('uvr_model'):
             env['PYVIDEOTRANS_UVR_MODEL'] = str(cfg['uvr_model'])
 
-        log(f'{head} — lồng tiếng {lang["voice"]} ...')
+        voice_label = lang['voice'] if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS \
+            else TTS_LABELS.get(int(cfg.get('tts_type')), 'TTS').split(' (')[0] + ' (GPU Modal)'
+        log(f'{head} — lồng tiếng {voice_label} ...')
         started = time.time()
         done = attempt(cfg, log, head, logs_dir / f'dub-{code}.log', cli_args,
-                       lambda: find_output_video(lang_out, video.stem) is not None, env=env)
+                       lambda: find_output_video(lang_out, video.stem) is not None, env=env, quiet=quiet)
 
         if is_separate:
             harvest_separated_audio(sep_dir, lang_out)
@@ -567,14 +641,43 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
         produced = find_output_video(lang_out, video.stem)
         if done and produced:
             finalize(cfg, log, head, produced, lang_out, final_dir, lang, video.stem)
-            results[code] = 'ok'
             log(f'{head} — xong sau {fmt_duration(time.time() - started)}')
-        else:
-            results[code] = 'failed'
-            log(f'{head} — LỖI (chi tiết: {logs_dir / f"dub-{code}.log"})')
+            return code, 'ok'
+        log(f'{head} — LỖI (chi tiết: {logs_dir / f"dub-{code}.log"})')
+        return code, 'failed'
 
-        if i < len(langs) and sleep_between > 0:
-            time.sleep(sleep_between)
+    # OmniVoice trên GPU Modal: giọng đã tạo sẵn (hoặc đọc trên máy chủ), phần còn lại là render
+    # trên máy này -> số ngôn ngữ làm cùng lúc theo sức máy (dub_parallel, "auto" = tự chọn).
+    # Edge-TTS giữ lần lượt vì Microsoft chặn khi gọi dồn dập.
+    parallel = 1 if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS else render_parallel(cfg, log)
+    todo = list(enumerate(langs, start=1))
+    if parallel == 1 or len(todo) <= 1:
+        for n, (i, lang) in enumerate(todo, start=1):
+            code, status = dub_one(i, lang, quiet=False)
+            results[code] = status
+            if status == 'ok' and n < len(todo) and sleep_between > 0:
+                time.sleep(sleep_between)
+    else:
+        # Tách nhạc nền chỉ làm 1 lần ở ngôn ngữ đầu: chạy riêng nó trước rồi mới chạy song song
+        if is_separate and not (sep_dir / 'instrument.wav').exists():
+            first = next((k for k, (_, l) in enumerate(todo)
+                          if not find_final_video(final_dir, l, video.stem)), None)
+            if first is not None:
+                i, lang = todo.pop(first)
+                code, status = dub_one(i, lang, quiet=False)
+                results[code] = status
+        log(f'  Lồng tiếng + render {parallel} ngôn ngữ cùng lúc '
+            f'(sửa "dub_parallel" trong dub_all.config.json để đổi).')
+        log('  Output chi tiết của từng ngôn ngữ nằm trong logs/dub-<mã>.log')
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            futures = [pool.submit(dub_one, i, lang, True) for i, lang in todo]
+            for fut in as_completed(futures):
+                try:
+                    code, status = fut.result()
+                except Exception as e:  # noqa: BLE001 - 1 ngôn ngữ hỏng không làm sập cả loạt
+                    log(f'  LỖI không mong đợi: {e}')
+                    continue
+                results[code] = status
 
     if cfg.get('cleanup_out', True) and out_dir.is_dir() and not any(out_dir.iterdir()):
         out_dir.rmdir()
@@ -1012,6 +1115,8 @@ def main() -> int:
         log(f'  Thư mục    : {workdir}')
         log(f'  Ngôn ngữ   : {len(langs)} — {", ".join(l["code"] for l in langs)}')
         log(f'  Video gốc  : {"nhúng phụ đề " + source_language if with_original else "không làm"}')
+        tts_type = int(cfg.get('tts_type', EDGE_TTS))
+        log(f'  Giọng đọc  : {TTS_LABELS.get(tts_type, f"tts_type={tts_type}")}')
         log('=' * 70)
 
         log('')
@@ -1038,6 +1143,11 @@ def main() -> int:
         if args.only != 'translate':
             log('')
             log('[2/2] Lồng tiếng + nhúng phụ đề + render...')
+            if langs:
+                try:
+                    phase_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log)
+                except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
+                    log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
             if with_original:
                 if not (subs_dir / f'{source_language}.srt').exists():
                     shutil.copy2(srt, subs_dir / f'{source_language}.srt')
@@ -1050,6 +1160,9 @@ def main() -> int:
             if langs:
                 dub_results.update(phase_dub(cfg, langs, video, subs_dir, out_dir, final_dir,
                                              style_dir, log, logs_dir))
+                # Đủ video mọi ngôn ngữ thì kho giọng tạo sẵn hết tác dụng (~200 MB/video)
+                if cfg.get('cleanup_out', True) and all(find_final_video(final_dir, l, video.stem) for l in langs):
+                    shutil.rmtree(workdir / '_tts', ignore_errors=True)
 
         elapsed = time.time() - started
         report_langs = ([original_lang(cfg)] if with_original else []) + langs

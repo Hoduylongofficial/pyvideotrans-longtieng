@@ -7,7 +7,7 @@ from pathlib import Path
 from videotrans.configure._paths import DUBBING_CACHE
 from videotrans.configure.config import tr, app_cfg, settings, logger
 from videotrans.configure.excepts import DubbingSrtError
-from videotrans.tts import run as run_tts, SUPPORT_CLONE
+from videotrans.tts import run as run_tts, SUPPORT_CLONE, OMNIVOICE_TTS
 from videotrans.util.help_misc import get_md5, vail_file
 from videotrans.util.help_srt import get_subtitle_from_srt, delete_punc
 
@@ -54,12 +54,28 @@ class DubbingMixin:
         line_roles = app_cfg.line_roles
         voice_role = self.cfg.voice_role
         logger.debug(f'{line_roles=}')
+        # 缓存键要能区分“声音来源”：OmniVoice 远程固定参考音色 -> 参考音频内容；
+        # clone 逐句克隆 -> 源视频 + 原句时间。否则换了参考音色或换了视频仍会命中旧配音
+        fixed_voice = ''
+        if self.cfg.tts_type == OMNIVOICE_TTS:
+            from videotrans.tts._omnivoice_modal import remote_configured, fixed_ref, native_voice, NATIVE_INSTRUCT
+            ref = fixed_ref() if remote_configured() else None
+            if remote_configured() and native_voice():
+                fixed_voice = 'native:' + NATIVE_INSTRUCT  # giọng mẫu bản xứ của ngôn ngữ này
+            elif ref:
+                import hashlib
+                fixed_voice = 'fixed:' + hashlib.md5(Path(ref[0]).read_bytes() + ref[1].encode()).hexdigest()
         for i, it in enumerate(subs):
             if it['end_time'] < it['start_time'] or not it['text'].strip():
                 continue
             voice = line_roles.get(f'{it["line"]}', voice_role) if line_roles else voice_role
+            voice_key = voice
+            if fixed_voice:
+                voice_key = fixed_voice
+            elif str(voice).strip().lower() == 'clone' and source_subs and i < len(source_subs):
+                voice_key = f"clone:{self.cfg.name}:{source_subs[i]['start_time']}-{source_subs[i]['end_time']}"
 
-            _key = get_md5(f"{self.cfg.target_language_code}-{it['text']}-{voice}-{rate}-{self.cfg.volume}-{self.cfg.pitch}-{self.cfg.tts_type}")
+            _key = get_md5(f"{self.cfg.target_language_code}-{it['text']}-{voice_key}-{rate}-{self.cfg.volume}-{self.cfg.pitch}-{self.cfg.tts_type}")
 
             tmp_dict = {
                 "text": it['text'],

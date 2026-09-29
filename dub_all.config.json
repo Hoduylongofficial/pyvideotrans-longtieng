@@ -2,6 +2,7 @@
   "_comment": "Cau hinh cho dub_all.py. Doi giong doc / font / style tai day, khong can sua code.",
   "source_language": "en",
   "translate_type": 6,
+  "_tts_type_note": "0=Edge-TTS (online, giong theo 'voice' tung ngon ngu) | 3=OmniVoice chay tren GPU thue Modal (nhai giong nguoi noi / giong mau co dinh). Doi bang DOI_TTS.bat.",
   "tts_type": 0,
   "subtitle_type": 1,
   "voice_autorate": true,
@@ -27,6 +28,10 @@
   "retries": 2,
   "_tts_concurrency_note": "So cau Edge-TTS doc cung luc. Microsoft chan khi goi don dap: 10 cau cung luc thi ~40% cau hong. Cau hong van duoc doc lai tung cau mot sau do.",
   "tts_concurrency": 3,
+  "_dub_parallel_note": "Chi dung voi OmniVoice (GPU Modal): so video render cung luc tren may nay. \"auto\" = tu chon theo may (RAM < 12GB hoac CPU < 4 nhan: 1; co card NVIDIA: toi da 3; CPU manh: 2). Dat so (1, 2, 3...) de ep. Edge-TTS luon chay lan luot.",
+  "dub_parallel": "auto",
+  "_tts_prefetch_note": "OmniVoice + giong mau co dinh: tao san giong moi ngon ngu truoc khi render, bao nhieu luot 32 cau chay cung luc tren GPU Modal (moi luot 1 GPU, toi da 10 theo max_containers). GPU chay lien 1 mach roi tat -> it lan khoi dong, re hon.",
+  "tts_prefetch_parallel": 10,
 
   "_cleanup_note": "Xoa thu muc out/<ma> sau khi da co video trong final/ (video trong final/ khong bi anh huong vi dung hardlink).",
   "cleanup_out": true,
@@ -92,7 +97,7 @@
     "name": "Anh (gốc)"
   },
 
-  "_languages_note":"Ten trong 'name' duoc dung de dat ten file video xuat ra. Bo tieng Anh vi do la ngon ngu goc.",
+  "_languages_note":"Ten trong 'name' duoc dung de dat ten file video xuat ra. Bo tieng Anh vi do la ngon ngu goc. \"omnivoice_voice\": \"native\" = voi OmniVoice, ngon ngu nay dung giong nam ban xu (tao 1 lan, luu o f5-tts/omnivoice_native) thay cho giong mau tieng Anh — giong mau tieng Anh lam ms, fil bi lo lo giong Anh.",
   "languages": [
     { "code": "ar",     "name": "Ả Rập",           "voice": "ar-EG-SalmaNeural" },
     { "code": "de",     "name": "Đức",             "voice": "de-DE-KatjaNeural" },
@@ -114,8 +119,8 @@
     { "code": "uk",     "name": "Ukraine",         "voice": "uk-UA-PolinaNeural" },
     { "code": "fi",     "name": "Phần Lan",        "voice": "fi-FI-NooraNeural" },
     { "code": "da",     "name": "Đan Mạch",        "voice": "da-DK-ChristelNeural" },
-    { "code": "fil",    "name": "Philippines",     "voice": "fil-PH-BlessicaNeural" },
-    { "code": "ms",     "name": "Mã Lai",          "voice": "ms-MY-YasminNeural" },
+    { "code": "fil",    "name": "Philippines",     "voice": "fil-PH-BlessicaNeural", "omnivoice_voice": "native" },
+    { "code": "ms",     "name": "Mã Lai",          "voice": "ms-MY-YasminNeural",    "omnivoice_voice": "native" },
     { "code": "el",     "name": "Hy Lạp",          "voice": "el-GR-AthinaNeural" },
     { "code": "cs",     "name": "Séc",             "voice": "cs-CZ-VlastaNeural" },
     { "code": "th",     "name": "Thái Lan",        "voice": "th-TH-PremwadeeNeural" }

@@ -13,6 +13,9 @@ class OmniVoice(BaseTTS):
 
 
     def _download(self):
+        from videotrans.tts._omnivoice_modal import remote_configured
+        if remote_configured():
+            return True  # 在 Modal GPU 上运行，本机不需要模型
         from videotrans.util import help_down
         if Path(f'{ROOT_DIR}/models/models--k2-fsa--OmniVoice/model.safetensors').exists():
             return True
@@ -26,6 +29,14 @@ class OmniVoice(BaseTTS):
         return True
         
     def _exec(self):
+        from videotrans.tts._omnivoice_modal import remote_configured, synthesize_remote
+        if remote_configured() and not self.is_redubb:
+            ok, err = synthesize_remote(self.queue_tts, self.language, signal=self.signal, is_exit=self._exit)
+            logger.debug(f'OmniVoice Modal: {ok=}, {err=}')
+            if ok < 1:
+                raise RuntimeError('OmniVoice (GPU Modal): không đọc được câu nào')
+            self._convert_24k()
+            return
         logs_file = f'{TEMP_DIR}/{self.uuid}/omnivoice-{time.time()}.log'
         queue_tts_file = f'{TEMP_DIR}/{self.uuid}/omnivoice-{time.time()}.json'
         Path(queue_tts_file).write_text(json.dumps(self.queue_tts),encoding='utf-8')
@@ -40,7 +51,9 @@ class OmniVoice(BaseTTS):
         from videotrans.process.omnivoice_tts import omnivoice_fun
         self._new_process(callback=omnivoice_fun,title=title,is_cuda=self.is_cuda,kwargs=kwargs)
         if self.is_redubb:return
+        self._convert_24k()
 
+    def _convert_24k(self):
         self.signal(text=tr('Standardized dubbing segment processing'))
         all_task = []
 

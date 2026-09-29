@@ -103,12 +103,74 @@ Bấm đúp `DOI_MODEL.bat` → chọn số trong menu (đóng `MO_PHAN_MEM` và
   404 (nhà cung cấp đã tắt), 429 (hết lượt), hết tiền, tên sai hoặc lỗi máy chủ thì tự
   chuyển sang model sau. Trong `DOI_MODEL.bat` mục 10 chọn nhiều số, vd `2,15,30`.
 
+### 1.5b2 Đổi giọng đọc: `DOI_TTS.bat`
+
+Bấm đúp `DOI_TTS.bat` (đóng `LONG_TIENG` trước):
+
+| Số | Việc |
+|---|---|
+| 1 | Edge-TTS — giọng Microsoft online, miễn phí (mặc định). Giọng từng ngôn ngữ theo `voice` trong `dub_all.config.json` |
+| 2 | OmniVoice trên **GPU thuê Modal** — nhái giọng. Nhập URL + key do quản trị gửi, tool tự kiểm tra kết nối |
+| 3 | Chọn giọng mẫu: **nhái từng câu** từ video gốc (mặc định) hoặc **1 file giọng mẫu cố định** |
+| 4 | Đọc thử 16 câu qua GPU Modal, ước tính thời gian + chi phí cho 1 video |
+| 5 | [Chỉ máy quản trị] Deploy / cập nhật server trên Modal, tạo key |
+
+- OmniVoice chạy trên GPU của Modal (modal.com), máy nhân viên **không cần card đồ hoạ**,
+  không tải model. Đo thực tế (GPU L4): ~0.75 giây GPU/câu; video 257 câu ~4-6 phút/ngôn
+  ngữ, **~1.5-2 USD GPU cho cả 25 ngôn ngữ**. Gói Starter của Modal cho 30 USD/tháng.
+- Giọng mẫu **cố định** cho giọng đều và chuẩn nhất: file 5-15 giây, 1 người nói, không
+  nhạc nền. Nên gõ đúng lời trong file (bỏ trống thì server tự nghe ra lời).
+- Nhái **từng câu** thì giống người nói gốc nhất, nhưng câu gốc nào lẫn nhạc/tiếng ồn thì
+  câu lồng tiếng đó cũng kém theo — nên bật `is_separate` (mặc định đang bật).
+- Key là mật khẩu dùng GPU trả tiền: chỉ gửi riêng cho nhân viên, không đăng nhóm chung.
+  Lộ key thì máy quản trị chạy mục 5 → tạo key mới, rồi gửi lại cho mọi người.
+- `CAP_NHAT.bat` giữ nguyên giọng đọc đã chọn trên từng máy.
+
+**Nhân viên kết nối Modal (làm 1 lần sau khi cập nhật):**
+
+1. Đóng `LONG_TIENG` / `MO_PHAN_MEM`, bấm `CAP_NHAT.bat`, chờ báo cập nhật xong.
+2. Bấm `DOI_TTS.bat` → gõ **2** → dán **URL** → Enter → dán **key** → Enter
+   (URL + key do quản trị gửi riêng qua Zalo). Thấy `Kết nối OK` và `ĐÃ ĐỔI sang:
+   OmniVoice trên GPU thuê Modal` là xong.
+3. (Tuỳ chọn) `DOI_TTS.bat` → **3** để chọn giọng mẫu; → **4** để đọc thử 16 câu.
+4. Chạy `LONG_TIENG.bat` như bình thường. Đầu màn hình phải có dòng
+   `Giọng đọc : OmniVoice (GPU thuê Modal, nhái giọng)`.
+
+Muốn quay về giọng Microsoft miễn phí: `DOI_TTS.bat` → **1**.
+Báo lỗi `sai key`: xin quản trị key mới rồi làm lại bước 2.
+
+Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
+
+1. **Tạo sẵn giọng** mọi ngôn ngữ trên GPU Modal, 10 lượt cùng lúc (`tts_prefetch_parallel`).
+   GPU chạy liền 1 mạch rồi tắt — ít lần khởi động, không ngồi chờ máy render. Âm thanh
+   lưu tạm ở `dubbing_<tên video>\_tts` (tự xoá khi đủ video mọi ngôn ngữ).
+2. **Render** trên máy mình, số video cùng lúc tự chọn theo sức máy (`dub_parallel: "auto"`):
+   RAM < 12 GB hoặc CPU < 4 nhân → 1 video; có card NVIDIA → tối đa 3; CPU mạnh → 2.
+   Màn hình ghi rõ dòng `Máy này: ... -> render N video cùng lúc`. Muốn ép thì đặt số.
+
+**Giọng bản xứ cho vài ngôn ngữ:** giọng mẫu tiếng Anh kéo âm Anh sang một số ngôn ngữ (đo
+thực tế: Mã Lai chỉ khớp 32%, Philippines 52%). Các ngôn ngữ có `"omnivoice_voice": "native"`
+trong `dub_all.config.json` (hiện: `ms`, `fil`) dùng giọng nam bản xứ của OmniVoice thay cho
+giọng mẫu — sau khi đổi: Mã Lai 93%, Philippines 91%. Giọng bản xứ nằm sẵn ở
+`f5-tts\omnivoice_native\` (đi kèm bản cập nhật) nên mọi máy cùng 1 giọng. Ngôn ngữ nào nghe
+lơ lớ thì thêm `"omnivoice_voice": "native"` vào dòng của ngôn ngữ đó.
+
+Chọn "nhái từng câu" thì không tạo sẵn được (giọng mẫu cắt từ video lúc lồng tiếng) —
+khi đó mỗi ngôn ngữ vừa đọc vừa render như cũ.
+
+Modal có thể không cấp đủ 10 GPU ngay (lần chạy thử chỉ có ~4 lúc đầu): các lượt sẽ xếp
+hàng, thời gian xếp hàng **không tính tiền**, chỉ chậm hơn.
+
+**Máy quản trị** (đã đăng nhập Modal): mục 5 → deploy. Sửa `modal_tts/omnivoice_modal.py`
+(vd đổi `GPU = 'L4'`, `max_containers`) thì chạy lại mục 5. Xem chi phí:
+https://modal.com/apps/hoduylongofficial/main/deployed/omnivoice-tts
+
 ### 1.5c Cập nhật bản mới: `CAP_NHAT.bat`
 
 Đóng `MO_PHAN_MEM` / `LONG_TIENG`, bấm đúp `CAP_NHAT.bat`. Nó tải bản mới nhất từ repo
 GitHub `Hoduylongofficial/pyvideotrans-longtieng` (public, không cần đăng nhập hay
 token), chỉ ghi đè code, **giữ nguyên** API key (`videotrans/params.json`),
-`videotrans/cfg.json`, kênh dịch + số dịch song song đã chọn trong
+`videotrans/cfg.json`, kênh dịch + số dịch song song + giọng đọc đã chọn trong
 `dub_all.config.json`. Thư viện thay đổi thì tự chạy `uv sync`.
 
 - Repo public nên **không bao giờ** được commit API key. `params.json`, `cfg.json`,

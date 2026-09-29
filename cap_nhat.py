@@ -53,7 +53,7 @@ VERSION_FILE = ROOT_DIR / '.phienban'
 TOKEN_FILE = ROOT_DIR / 'update_token.txt'
 DUB_CONFIG = 'dub_all.config.json'
 # Giá trị riêng của từng máy trong dub_all.config.json, giữ lại khi cập nhật
-KEEP_DUB_VALUES = ('translate_type', 'translate_parallel')
+KEEP_DUB_VALUES = ('translate_type', 'translate_parallel', 'tts_type', 'tts_concurrency', 'dub_parallel', 'cuda')
 # Không bao giờ ghi đè / xoá, kể cả khi lỡ có trên GitHub
 PROTECTED = {'videotrans/params.json', 'videotrans/cfg.json', 'update_token.txt', '.phienban'}
 PROTECTED_DIRS = ('.venv/', 'models/', 'output/', 'logs/', '.git/')
@@ -164,15 +164,16 @@ def file_hash(paths) -> str:
 
 
 def merge_dub_config(new_raw: str) -> str:
-    """Lấy file cấu hình mới nhưng giữ kênh dịch / dịch song song đang dùng trên máy này."""
+    """Lấy file cấu hình mới nhưng giữ kênh dịch / giọng đọc / dịch song song đang dùng trên máy này."""
     local = ROOT_DIR / DUB_CONFIG
     if not local.exists():
         return new_raw
     old_raw = local.read_text(encoding='utf-8')
+    value = r'(-?\d+|true|false|"auto")'
     for name in KEEP_DUB_VALUES:
-        m = re.search(rf'"{name}"\s*:\s*(-?\d+)', old_raw)
+        m = re.search(rf'"{name}"\s*:\s*{value}', old_raw)
         if m:
-            new_raw = re.sub(rf'("{name}"\s*:\s*)-?\d+', rf'\g<1>{m.group(1)}', new_raw, count=1)
+            new_raw = re.sub(rf'("{name}"\s*:\s*){value}', rf'\g<1>{m.group(1)}', new_raw, count=1)
     return new_raw
 
 
