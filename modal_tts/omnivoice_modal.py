@@ -48,7 +48,7 @@ image = (
 
 @app.cls(gpu=GPU, image=image, timeout=900,
          scaledown_window=120,      # rảnh 2 phút thì tắt, không tốn tiền
-         max_containers=10,         # chặn trần: tối đa 10 GPU cùng lúc (dub_all tạo giọng trước 10 luồng)
+         max_containers=8,          # chặn trần: tối đa 8 GPU cùng lúc (dub_all tạo giọng trước 8 luồng)
          secrets=[modal.Secret.from_name('omnivoice-auth')])
 class OmniVoiceTTS:
     @modal.enter()

@@ -58,10 +58,13 @@ class DubbingMixin:
         # clone 逐句克隆 -> 源视频 + 原句时间。否则换了参考音色或换了视频仍会命中旧配音
         fixed_voice = ''
         if self.cfg.tts_type == OMNIVOICE_TTS:
-            from videotrans.tts._omnivoice_modal import remote_configured, fixed_ref, native_voice, NATIVE_INSTRUCT
+            from videotrans.tts._omnivoice_modal import remote_configured, fixed_ref, native_voice, NATIVE_INSTRUCT, NATIVE_DIR
             ref = fixed_ref() if remote_configured() else None
             if remote_configured() and native_voice():
-                fixed_voice = 'native:' + NATIVE_INSTRUCT  # giọng mẫu bản xứ của ngôn ngữ này
+                # giọng mẫu bản xứ của ngôn ngữ này: khoá theo nội dung file mẫu (tạo lại mẫu -> đọc lại)
+                import hashlib
+                nref = NATIVE_DIR / f'{self.cfg.target_language_code}.wav'
+                fixed_voice = 'native:' + (hashlib.md5(nref.read_bytes()).hexdigest() if nref.is_file() else NATIVE_INSTRUCT)
             elif ref:
                 import hashlib
                 fixed_voice = 'fixed:' + hashlib.md5(Path(ref[0]).read_bytes() + ref[1].encode()).hexdigest()

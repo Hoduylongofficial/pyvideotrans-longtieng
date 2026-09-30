@@ -539,7 +539,7 @@ def phase_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
         return
     started = time.time()
     native = {l['code'] for l in langs if str(l.get('omnivoice_voice', '')).lower() == 'native'}
-    res = prefetch(store, jobs, parallel=max(1, int(cfg.get('tts_prefetch_parallel', 10))), log=log,
+    res = prefetch(store, jobs, parallel=max(1, int(cfg.get('tts_prefetch_parallel', 8))), log=log,
                    native=native & set(jobs))
     done = sum(v[0] for v in res.values())
     log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, {len(res)} ngôn ngữ')

@@ -44,6 +44,33 @@ def native_voice(language_voice: str = None) -> bool:
     return str(v).strip().lower() == 'native'
 
 
+def _native_sample(language: str, texts: list) -> str:
+    """参考文本：尽量纯本语言（少拉丁字母/品牌名）、完整的句子，拼到约 6 秒。
+
+    参考音频太短（<4 秒）或满是英文品牌名时，克隆出的短句容易读坏（实测日语 3 秒参考：
+    「1つ目：監視。」只读出「ん」）。
+    """
+    import re
+    cjk = language.split('-')[0] in ('ja', 'zh', 'ko', 'th')
+    target = 32 if cjk else 90  # ~6 秒
+    cands = []
+    for t in dict.fromkeys(x.strip() for x in texts if x.strip()):
+        latin = len(re.findall(r'[A-Za-z]', t)) if language.split('-')[0] not in ('en',) else 0
+        latin_ratio = latin / max(1, len(t))
+        if latin_ratio > 0.2 or not re.search(r'[.!?。！？]$', t):
+            continue  # nhiều chữ Latin hoặc câu dở dang
+        cands.append(t)
+    if not cands:
+        cands = [x.strip() for x in texts if x.strip()] or ['OK']
+    cands.sort(key=len, reverse=True)
+    sample = ''
+    for t in cands:
+        sample = (sample + (' ' if not cjk and sample else '') + t) if sample else t
+        if len(sample) >= target:
+            break
+    return sample
+
+
 def native_ref(language: str, texts: list, url: str, key: str) -> tuple:
     """该语言的本地口音参考音频 (wav 路径, 文本)，没有则在 Modal 上用 voice design 生成一次并保存"""
     import numpy as np
@@ -52,9 +79,7 @@ def native_ref(language: str, texts: list, url: str, key: str) -> tuple:
     txt = path.with_suffix('.txt')
     if path.is_file() and txt.is_file():
         return str(path), txt.read_text(encoding='utf-8').strip()
-    # 取前面较长的一句（5-15 秒效果最好）作为参考文本
-    cands = [t.strip() for t in texts[:40] if t.strip()]
-    sample = max(cands, key=len) if cands else 'OK'
+    sample = _native_sample(language, texts)
     for _ in range(3):
         data = _post(url, key, {'items': [{'text': sample, 'language': language, 'instruct': NATIVE_INSTRUCT}]})
         raw = base64.b64decode(data['audios'][0])
@@ -234,7 +259,7 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
     return ok, err
 
 
-def prefetch(store: Path, jobs: dict, parallel: int = 10, log=print, native: set = frozenset()) -> dict:
+def prefetch(store: Path, jobs: dict, parallel: int = 8, log=print, native: set = frozenset()) -> dict:
     """固定参考音色下，把 {语言: [文本,...]} 全部预先合成进仓库；native 中的语言用本地口音音色。
 
     所有语言的分块放进同一个线程池，保持 parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器），

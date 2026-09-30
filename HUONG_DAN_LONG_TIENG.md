@@ -141,7 +141,7 @@ Báo lỗi `sai key`: xin quản trị key mới rồi làm lại bước 2.
 
 Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
 
-1. **Tạo sẵn giọng** mọi ngôn ngữ trên GPU Modal, 10 lượt cùng lúc (`tts_prefetch_parallel`).
+1. **Tạo sẵn giọng** mọi ngôn ngữ trên GPU Modal, 8 lượt cùng lúc (`tts_prefetch_parallel`).
    GPU chạy liền 1 mạch rồi tắt — ít lần khởi động, không ngồi chờ máy render. Âm thanh
    lưu tạm ở `dubbing_<tên video>\_tts` (tự xoá khi đủ video mọi ngôn ngữ).
 2. **Render** trên máy mình, số video cùng lúc tự chọn theo sức máy (`dub_parallel: "auto"`):
@@ -150,15 +150,17 @@ Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
 
 **Giọng bản xứ cho vài ngôn ngữ:** giọng mẫu tiếng Anh kéo âm Anh sang một số ngôn ngữ (đo
 thực tế: Mã Lai chỉ khớp 32%, Philippines 52%). Các ngôn ngữ có `"omnivoice_voice": "native"`
-trong `dub_all.config.json` (hiện: `ms`, `fil`) dùng giọng nam bản xứ của OmniVoice thay cho
-giọng mẫu — sau khi đổi: Mã Lai 93%, Philippines 91%. Giọng bản xứ nằm sẵn ở
+trong `dub_all.config.json` (hiện: `ar`, `ja`, `tr`, `zh-tw`, `id`, `da`, `fil`, `ms`) dùng giọng
+nam bản xứ của OmniVoice thay cho giọng mẫu — sau khi đổi: Mã Lai 93%, Philippines 91%; thử 30
+câu mỗi ngôn ngữ: ar 75→81%, ja 95→96%, tr 83→89%, id 79→85%, da 86→94%, zh-tw 71→79%, và
+Whisper nhận đúng ngôn ngữ 30/30 câu (giọng Daniel: id chỉ 8/30). Giọng bản xứ nằm sẵn ở
 `f5-tts\omnivoice_native\` (đi kèm bản cập nhật) nên mọi máy cùng 1 giọng. Ngôn ngữ nào nghe
 lơ lớ thì thêm `"omnivoice_voice": "native"` vào dòng của ngôn ngữ đó.
 
 Chọn "nhái từng câu" thì không tạo sẵn được (giọng mẫu cắt từ video lúc lồng tiếng) —
 khi đó mỗi ngôn ngữ vừa đọc vừa render như cũ.
 
-Modal có thể không cấp đủ 10 GPU ngay (lần chạy thử chỉ có ~4 lúc đầu): các lượt sẽ xếp
+Modal có thể không cấp đủ 8 GPU ngay (lần chạy thử chỉ có ~4 lúc đầu): các lượt sẽ xếp
 hàng, thời gian xếp hàng **không tính tiền**, chỉ chậm hơn.
 
 **Máy quản trị** (đã đăng nhập Modal): mục 5 → deploy. Sửa `modal_tts/omnivoice_modal.py`
