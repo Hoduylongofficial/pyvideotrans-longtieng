@@ -145,8 +145,10 @@ Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
    GPU chạy liền 1 mạch rồi tắt — ít lần khởi động, không ngồi chờ máy render. Âm thanh
    lưu tạm ở `dubbing_<tên video>\_tts` (tự xoá khi đủ video mọi ngôn ngữ).
 2. **Render** trên máy mình, số video cùng lúc tự chọn theo sức máy (`dub_parallel: "auto"`):
-   RAM < 12 GB hoặc CPU < 4 nhân → 1 video; có card NVIDIA → tối đa 3; CPU mạnh → 2.
-   Màn hình ghi rõ dòng `Máy này: ... -> render N video cùng lúc`. Muốn ép thì đặt số.
+   RAM < 12 GB hoặc CPU < 4 nhân → 1 video; mã hoá bằng card đồ hoạ → 2; CPU ≥ 6 nhân và
+   RAM ≥ 16 GB → 2; còn lại 1. Màn hình ghi rõ dòng `Máy này: ... -> render N video cùng lúc`.
+   Muốn ép thì đặt số. (Đo thực tế: 1 video libx264 đã chiếm gần hết CPU, chạy 3 cùng lúc chỉ
+   nhanh hơn ~16% — đặt số cao không nhanh hơn mà dễ tràn RAM.)
 
 **Giọng bản xứ cho vài ngôn ngữ:** giọng mẫu tiếng Anh kéo âm Anh sang một số ngôn ngữ (đo
 thực tế: Mã Lai chỉ khớp 32%, Philippines 52%). Các ngôn ngữ có `"omnivoice_voice": "native"`
@@ -244,8 +246,11 @@ không. Ưng rồi mới chạy số 2.
 
 Cứ để cửa sổ đó chạy. Máy vẫn dùng việc khác được nhưng sẽ chậm.
 
-- Ngôn ngữ **đầu tiên lâu hơn hẳn** vì phải tách nhạc nền ra khỏi giọng nói — bình
-  thường, không phải treo máy. 24 ngôn ngữ sau chạy nhanh hơn nhiều.
+- Tách nhạc nền ra khỏi giọng nói chạy **song song với bước dịch** (dòng `Tách nhạc nền +
+  SFX chạy song song...`, chi tiết ở `logs/separate.log`). Nếu dịch xong trước, màn hình hiện
+  `Đang chờ tách nhạc nền + SFX xong...` — bình thường, không phải treo máy.
+- Lần đầu chạy trên một máy, phần mềm đo thử vài giây để chọn cách mã hoá video nhanh nhất
+  (dòng `Mã hoá video: ...`), các lần sau dùng lại kết quả.
 - Video 20 phút, 25 ngôn ngữ: dự trù vài tiếng.
 
 **Lỡ tắt giữa chừng hoặc mất điện?** Mở lại `LONG_TIENG.bat`, làm y như cũ. Phần đã
@@ -295,6 +300,9 @@ Mở `dub_all.config.json` bằng Notepad. **Sửa xong nhớ lưu, giữ nguyê
 | Âm lượng to nhỏ | `loudnorm_i` (−14 là chuẩn YouTube; −13 to hơn, −16 nhỏ hơn) |
 | Nhạc nền to nhỏ | `backaudio_volume` (0.8 mặc định; 1.4 nhạc rõ hơn, 0.5 nhạc nhẹ đi) |
 | Không giữ nhạc nền nữa | `"is_separate": false` — chạy nhanh hơn nhiều |
+| Hình nét hơn / file nhỏ hơn | `video_crf` (21 mặc định; 19–20 nét hơn, 23 file nhỏ hơn) |
+| Mã hoá chậm mà kỹ hơn | `video_preset` (`veryfast` mặc định; `faster`/`medium` file nhỏ hơn nhưng chậm hơn) |
+| Ép cách mã hoá video | `video_encoder` (`auto` mặc định; `libx264` = CPU, `h264_nvenc` = card NVIDIA, `h264_qsv` = Intel, `h264_amf` = AMD). Xoá `videotrans/encoder_choice.json` để máy đo lại |
 | Không nhúng phụ đề vào hình | `"subtitle_type": 0` — nhanh hơn rất nhiều vì không phải mã hoá lại video |
 | Giữ lại thư mục trung gian | `"cleanup_out": false` |
 
@@ -350,4 +358,18 @@ Tên giọng phải chép đúng y nguyên, ví dụ `de-DE-KatjaNeural`.
   - Kết luận: giữ `deepseek/deepseek-v4.1-flash`; tiền tiết kiệm được không đáng so
     với rủi ro sai bản dịch và hỏng giọng đọc.
 - Tách nhạc nền dùng model UVR-MDX-NET-Inst_HQ_4, tự tải về lần đầu (59 MB).
-- Âm lượng đầu ra chuẩn hoá về −14 LUFS bằng loudnorm 2 lượt.
+- Âm lượng đầu ra chuẩn hoá về −14 LUFS bằng loudnorm 2 lượt, làm ngay trên track tiếng
+  trước khi ghép với hình (không ghi lại cả video thêm 1 lần).
+- **Tối ưu render (09/2026)** — phụ đề nhúng cứng nên mỗi ngôn ngữ bắt buộc mã hoá lại toàn
+  bộ hình, đây là khâu lâu nhất. Đo trên clip 156 giây 1080p (i5-14600K + RTX 3060), cùng 2
+  ngôn ngữ: khâu ghép + mã hoá + chuẩn hoá âm lượng mỗi ngôn ngữ **28s → 15s**, file lồng
+  tiếng **100 MB → 35 MB**, bản gốc có phụ đề 17s → 11s. Các thay đổi:
+  - Bỏ `preset slow` (máy có card NVIDIA còn bị đổi thành `h264_nvenc p7`, vừa chậm nhất vừa
+    cho file to gấp ~3 lần); dùng `libx264 veryfast crf 21`, hoặc card đồ hoạ nếu đo thấy nhanh
+    hơn ≥ 1.3 lần. Kết quả đo lưu ở `videotrans/encoder_choice.json` (riêng từng máy).
+  - Đọc hình thẳng từ video gốc, không tạo bản sao `novoice.mp4` cho từng ngôn ngữ (video
+    20 phút đỡ ~1 GB ghi đĩa mỗi ngôn ngữ; nếu video gốc không phải H.264 thì đỡ luôn 1 lần
+    mã hoá). `vocal.wav` / `instrument.wav` cũng dùng chung, không copy sang từng ngôn ngữ.
+  - Không xuất các file `.m4a` tiếng gốc / tiếng lồng vào thư mục trung gian (không dùng tới).
+  - Tách nhạc nền chạy ở tiến trình riêng ngay từ đầu, song song với dịch + tạo giọng.
+  - Server Modal tắt GPU sau 30 giây rảnh thay vì 120 giây (8 GPU × 90 giây thừa mỗi video).

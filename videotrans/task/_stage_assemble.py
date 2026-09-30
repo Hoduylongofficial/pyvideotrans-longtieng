@@ -1,6 +1,8 @@
 import glob
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +15,27 @@ from videotrans.configure.config import tr, app_cfg, settings, logger
 from videotrans.configure.excepts import VideoTransError, FFmpegError
 from videotrans.util.help_ffmpeg import get_video_codec, get_audio_time, runffmpeg, get_video_duration
 from videotrans.util.help_misc import vail_file, read_last_n_lines, is_novoice_mp4
+
+
+# dub_all.py 通过环境变量控制合成阶段（未设置时行为与原版一致）：
+#   PYVIDEOTRANS_VIDEO_ENC           视频编码参数 JSON 列表，如 ["-c:v","libx264","-preset","veryfast","-crf","21"]
+#   PYVIDEOTRANS_VIDEO_ENC_FALLBACK  上面的编码失败时（如硬件编码器会话不足）改用的参数
+#   PYVIDEOTRANS_LOUDNORM            "I:TP:LRA"，在生成配音音轨时直接做两遍 loudnorm，省掉成片后再整体重写一遍
+#   PYVIDEOTRANS_LEAN_OUTPUT         "1" 时不额外输出原始音频/配音 m4a 到目标文件夹（批量配音用不到）
+def _env_args(name: str):
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return None
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        logger.warning(f'{name} 不是合法的 JSON 列表，忽略: {raw}')
+        return None
+    return [str(a) for a in args] if isinstance(args, list) and args else None
+
+
+def _lean_output() -> bool:
+    return os.environ.get('PYVIDEOTRANS_LEAN_OUTPUT', '') == '1'
 
 
 class AssembleMixin:
@@ -61,20 +84,59 @@ class AssembleMixin:
         sec = duration_ms / 1000.0
         final_video_path = Path(f'{self.cfg.cache_folder}/final_video_with_freeze_lastend.mp4').as_posix()
 
-        cmd = ['-y', '-i', os.path.basename(self.cfg.novoice_mp4),
+        enc = _env_args('PYVIDEOTRANS_VIDEO_ENC_FALLBACK') or _env_args('PYVIDEOTRANS_VIDEO_ENC') or [
+            '-c:v', 'libx264', '-crf', f'{settings.get("crf", 23)}', '-preset', settings.get('preset', 'veryfast')]
+        cmd = ['-y', '-i', self._ffmpeg_input(self.cfg.novoice_mp4),
                '-vf', f'tpad=stop_mode=clone:stop_duration={sec:.3f}',
-               '-c:v', 'libx264',
-               '-crf', f'{settings.get("crf", 23)}',
-               '-preset', settings.get('preset', 'veryfast'),
+               *enc,
                '-an', 'final_video_with_freeze_lastend.mp4'
         ]
         try:
             runffmpeg(cmd, force_cpu=True, cmd_dir=self.cfg.cache_folder)
             if Path(final_video_path).exists():
-                shutil.copy2(final_video_path, self.cfg.novoice_mp4)
+                # 改为指向新文件，不覆盖原文件：novoice_mp4 可能直接就是用户的原视频
+                self.cfg.novoice_mp4 = final_video_path
                 logger.debug(f"视频定格应延长{duration_ms}ms，实际向上取整秒延长{sec}s,操作成功。")
         except Exception as e:
             logger.exception(f"视频定格延长操作失败,跳过 {e}", exc_info=True)
+
+    def _ffmpeg_input(self, path) -> str:
+        """ffmpeg 在 cache_folder 下运行：缓存目录内的文件用文件名，其它位置（如直接使用原视频）用绝对路径"""
+        p = Path(path)
+        try:
+            if p.resolve().parent == Path(self.cfg.cache_folder).resolve():
+                return p.name
+        except OSError:
+            pass
+        return p.resolve().as_posix()
+
+    def _loudnorm_filter(self, wav: str):
+        """PYVIDEOTRANS_LOUDNORM="I:TP:LRA" 时先测量配音音轨响度，返回第二遍的 loudnorm 滤镜（线性增益，背景音乐不随台词忽大忽小）"""
+        spec = os.environ.get('PYVIDEOTRANS_LOUDNORM', '').strip()
+        if not spec:
+            return None
+        marker = Path(self.cfg.target_dir, 'loudnorm.json')  # dub_all 据此判断成片已标准化，无需再处理
+        marker.unlink(missing_ok=True)
+        try:
+            target_i, target_tp, target_lra = spec.split(':')
+            base = f'loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}'
+            probe = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-nostats', '-nostdin', '-i', wav, '-vn',
+                 '-af', f'{base}:print_format=json', '-f', 'null', '-'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            blocks = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', probe.stderr, re.S)
+            m = json.loads(blocks[-1])
+            if float(m['input_i']) < -70:  # 几乎静音，拉高只会放大噪声
+                return None
+        except Exception as e:
+            logger.exception(f'测量配音响度失败，跳过响度标准化 {e}', exc_info=True)
+            return None
+        marker.write_text(json.dumps(m), encoding='utf-8')
+        logger.debug(f'配音响度 {m["input_i"]} LUFS -> {target_i} LUFS')
+        return (f'{base}:measured_I={m["input_i"]}:measured_TP={m["input_tp"]}'
+                f':measured_LRA={m["input_lra"]}:measured_thresh={m["input_thresh"]}'
+                f':offset={m["target_offset"]}:linear=true')
 
     def _join_video_audio_srt(self) -> None:
         if self._exit() or not self.should_hebing:
@@ -119,7 +181,10 @@ class AssembleMixin:
                     logger.exception(f'单独输出原始视频中音频文件到目标文件夹失败，跳过{e}', exc_info=True)
                 finally:
                     output_source_output = True
-            threading.Thread(target=_output, daemon=True).start()
+            if _lean_output():
+                output_source_output = True
+            else:
+                threading.Thread(target=_output, daemon=True).start()
             self.signal(text=tr("Check manually added BGM..."))
             self._back_music()
             self.signal(text=tr("Check original BGM..."))
@@ -132,19 +197,28 @@ class AssembleMixin:
                 os.path.basename(self.cfg.target_wav)
             ]
             v_a_offset=duration_ms-audio_ms
+            audio_filters = []
             # 视频时长大于音频超过100ms，音频末尾补静音
             if v_a_offset>100:
                 audio_had_append=True
                 logger.debug(f'视频时长{duration_ms}ms-音频时长{audio_ms}ms={v_a_offset}ms,需延长音频')
-                _cmd.extend(['-af', f'apad=pad_dur={v_a_offset/1000.0}'])
+                audio_filters.append(f'apad=pad_dur={v_a_offset/1000.0}')
+            loudnorm = self._loudnorm_filter(self.cfg.target_wav)
+            if loudnorm:
+                audio_filters.append(loudnorm)
+            if audio_filters:
+                _cmd.extend(['-af', ','.join(audio_filters)])
+            # loudnorm 内部会升采样到 192kHz，必须指定输出采样率；成片只编码这一次音频，码率给足
+            _cmd.extend(["-ac", "2", "-b:a", "192k", "-ar", "48000"] if loudnorm else ["-ac", "2", "-b:a", "128k"])
             _cmd.extend([
-                "-ac", "2", "-b:a", "128k", "-c:a", "aac",
+                "-c:a", "aac",
                 os.path.basename(target_m4a)
             ])
             self.signal(text=tr("Process voiceover for embedding..."))
             runffmpeg(_cmd, cmd_dir=self.cfg.cache_folder)
 
-        shutil.copy2(target_m4a, self.cfg.target_wav_output)
+        if not _lean_output():
+            shutil.copy2(target_m4a, self.cfg.target_wav_output)
         self.precent = min(max(95, self.precent), 98)
         _video_output_ext = settings.get('out_video_ext', '.mp4')
         subtitles_file, subtitle_langcode = None, None
@@ -178,7 +252,7 @@ class AssembleMixin:
             protxt_basename = os.path.basename(protxt)
             threading.Thread(target=self._hebing_pro, args=(protxt,), daemon=True).start()
 
-            novoice_mp4_basename = os.path.basename(self.cfg.novoice_mp4)
+            novoice_mp4_basename = self._ffmpeg_input(self.cfg.novoice_mp4)
             target_m4a_basename = os.path.basename(target_m4a)
             tmp_target_mp4_basename = os.path.basename(tmp_target_mp4)
 
@@ -273,7 +347,20 @@ class AssembleMixin:
                 if fps_mode:
                     cmd3.extend(fps_mode)
                 cmd3.extend(['-shortest', tmp_target_mp4_basename])
-                if app_cfg.video_codec.startswith('libx') or settings.get('force_lib'):
+                enc_override = _env_args('PYVIDEOTRANS_VIDEO_ENC')
+                if enc_override:
+                    # dub_all 已在本机实测选好编码器，直接使用；失败（如硬件编码会话已满）再用备用参数
+                    base = cmd0 + cmd1 + subtitle_filter + ['-map', '[v_out]', '-map', '1:a', '-c:a', 'copy']
+                    logger.debug(f'[最终视频合成]使用指定编码参数 {enc_override}')
+                    try:
+                        runffmpeg(base + enc_override + cmd3, cmd_dir=self.cfg.cache_folder, force_cpu=True)
+                    except Exception as e:
+                        fallback = _env_args('PYVIDEOTRANS_VIDEO_ENC_FALLBACK')
+                        if not fallback or fallback == enc_override:
+                            raise
+                        logger.exception(f'指定编码器合成失败，改用备用编码参数 {fallback}: {e}', exc_info=True)
+                        runffmpeg(base + fallback + cmd3, cmd_dir=self.cfg.cache_folder, force_cpu=True)
+                elif app_cfg.video_codec.startswith('libx') or settings.get('force_lib'):
                     logger.debug(f'[最终视频合成]不支持硬件编解码或指定了强制软编解码:\n{cmd0 + cmd1 + cmd2}')
                     runffmpeg(cmd0 + cmd1 + subtitle_filter + cmd2 + enc_qua + cmd3,
                                     cmd_dir=self.cfg.cache_folder, force_cpu=True)

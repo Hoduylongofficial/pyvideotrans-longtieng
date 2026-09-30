@@ -47,7 +47,9 @@ image = (
 
 
 @app.cls(gpu=GPU, image=image, timeout=900,
-         scaledown_window=120,      # rảnh 2 phút thì tắt, không tốn tiền
+         # Rảnh 30 giây thì tắt. dub_all tạo giọng một mạch rồi mới render nên máy nào xong việc là
+         # thừa; để 120s thì 8 máy x 2 phút chạy không ~ 16 phút GPU mỗi video (~12% tiền).
+         scaledown_window=30,
          max_containers=8,          # chặn trần: tối đa 8 GPU cùng lúc (dub_all tạo giọng trước 8 luồng)
          secrets=[modal.Secret.from_name('omnivoice-auth')])
 class OmniVoiceTTS:

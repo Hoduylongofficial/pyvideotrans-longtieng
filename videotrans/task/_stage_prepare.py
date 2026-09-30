@@ -36,18 +36,26 @@ class PrepareMixin:
             self.is_copy_video = True
 
         raw_vocal = f"{self.cfg.target_dir}/vocal.wav"
-        if vail_file(raw_vocal):
-            shutil.copy2(raw_vocal, self.cfg.vocal)
-
         raw_instrument = f"{self.cfg.target_dir}/instrument.wav"
-        if vail_file(raw_instrument):
-            shutil.copy2(raw_instrument, self.cfg.instrument)
+        if vail_file(raw_vocal) and vail_file(raw_instrument):
+            # 已分离好的人声/背景声直接引用，不再复制到缓存目录（长视频每种语言可省下数百 MB 写入）
+            self.cfg.vocal, self.cfg.instrument = raw_vocal, raw_instrument
+        else:
+            if vail_file(raw_vocal):
+                shutil.copy2(raw_vocal, self.cfg.vocal)
+            if vail_file(raw_instrument):
+                shutil.copy2(raw_instrument, self.cfg.instrument)
 
         if not self.is_audio_trans and self.cfg.app_mode != 'tiqu':
-            app_cfg.queue_novice[self.uuid] = 'ing'
-            if not self.is_copy_video:
-                self.signal(text=tr("Video needs transcoded and take a long time.."))
-            run_in_threadpool(self._split_novoice_byraw)
+            if self._novoice_direct():
+                # 反正要重新编码（硬字幕），直接读取原视频的画面，不再先复制出一份无声视频
+                self.cfg.novoice_mp4 = Path(self.cfg.name).resolve().as_posix()
+                app_cfg.queue_novice[self.uuid] = 'end'
+            else:
+                app_cfg.queue_novice[self.uuid] = 'ing'
+                if not self.is_copy_video:
+                    self.signal(text=tr("Video needs transcoded and take a long time.."))
+                run_in_threadpool(self._split_novoice_byraw)
         else:
             app_cfg.queue_novice[self.uuid] = 'end'
 
@@ -114,6 +122,12 @@ class PrepareMixin:
             
         self.signal(text=tr('endfenliyinpin'))
         logger.debug(f'[预处理阶段结束耗时]:{time.time()-_st}s')
+
+    def _novoice_direct(self) -> bool:
+        """dub_all 设置 PYVIDEOTRANS_NOVOICE_DIRECT=1：嵌入硬字幕且不慢放视频时，合成阶段直接读原视频画面。
+        前提是后续步骤都不会改写 novoice_mp4（视频慢放会改写，所以排除）。"""
+        return (os.environ.get('PYVIDEOTRANS_NOVOICE_DIRECT') == '1'
+                and self.cfg.subtitle_type in (1, 3) and not self.cfg.video_autorate)
 
     def _split_novoice_byraw(self):
         import os

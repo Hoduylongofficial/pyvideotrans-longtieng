@@ -22,6 +22,7 @@ Cấu hình giọng đọc / kênh dịch / style phụ đề: dub_all.config.js
 import argparse
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -486,20 +487,24 @@ def harvest_separated_audio(sep_dir: Path, lang_out: Path) -> None:
             shutil.move(str(produced), str(master))
 
 
-def auto_render_parallel() -> tuple:
-    """Số video render cùng lúc hợp với máy: (số, lý do). Render nặng CPU/RAM, máy yếu làm nhiều sẽ lỗi/treo."""
+def auto_render_parallel(encoder: str = 'libx264') -> tuple:
+    """Số video render cùng lúc hợp với máy: (số, lý do). Render nặng CPU/RAM, máy yếu làm nhiều sẽ lỗi/treo.
+
+    Đo thực tế (i5-14600K): 1 video libx264 đã chiếm gần hết CPU, 3 video cùng lúc chỉ nhanh hơn ~16%;
+    NVENC 3 video cùng lúc còn chậm hơn chạy CPU. Chạy 2 cùng lúc chủ yếu để phần không phải mã hoá
+    (ghép tiếng, co giãn giọng, khởi động) của video này lấp vào lúc video kia đang mã hoá.
+    """
     try:
         import psutil
         cores = psutil.cpu_count(logical=False) or os.cpu_count() or 2
         ram = psutil.virtual_memory().total / 2 ** 30
     except Exception:  # noqa: BLE001
         cores, ram = os.cpu_count() or 2, 8.0
-    nvidia = shutil.which('nvidia-smi') is not None
-    info = f'{cores} nhân CPU, {ram:.0f} GB RAM, {"có" if nvidia else "không có"} card NVIDIA'
+    info = f'{cores} nhân CPU, {ram:.0f} GB RAM, mã hoá {encoder}'
     if ram < 12 or cores < 4:
         return 1, info
-    if nvidia:  # render bằng NVENC trên card, CPU chỉ ghép tiếng/phụ đề
-        return min(3, max(1, cores // 4)), info
+    if encoder != 'libx264':  # mã hoá trên card đồ hoạ: CPU còn rảnh để giải mã + vẽ phụ đề video thứ 2
+        return 2, info
     return (2 if cores >= 6 and ram >= 16 else 1), info
 
 
@@ -507,10 +512,210 @@ def render_parallel(cfg: dict, log=None) -> int:
     value = str(cfg.get('dub_parallel', 'auto')).strip().lower()
     if value.isdigit() and int(value) >= 1:
         return int(value)
-    n, info = auto_render_parallel()
+    n, info = auto_render_parallel(video_encoder(cfg)['name'])
     if log:
         log(f'  Máy này: {info} -> render {n} video cùng lúc (dub_parallel = auto)')
     return n
+
+
+# ---------------------------------------------------------------------------
+# Chọn bộ mã hoá video. Phụ đề nhúng cứng -> mỗi video bắt buộc mã hoá lại toàn bộ hình,
+# đây là khâu tốn thời gian nhất cả quy trình.
+# ---------------------------------------------------------------------------
+HW_ENCODERS = ('h264_nvenc', 'h264_qsv', 'h264_amf')
+ENCODER_CACHE = ROOT_DIR / 'videotrans' / 'encoder_choice.json'
+# Mã hoá bằng card cho file to hơn / kém nét hơn libx264 ở cùng dung lượng -> chỉ chọn khi nhanh hơn rõ rệt
+HW_MIN_SPEEDUP = 1.3
+
+
+def encoder_args(name: str, preset: str, crf: int) -> list:
+    """Tham số ffmpeg cho từng bộ mã hoá, chất lượng quy về cùng thang crf của libx264."""
+    q = str(crf + 3)  # thang chất lượng của card đồ hoạ lệch với crf libx264 khoảng vài bậc
+    if name == 'h264_nvenc':
+        return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', q, '-b:v', '0', '-pix_fmt', 'yuv420p']
+    if name == 'h264_qsv':
+        return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', q]
+    if name == 'h264_amf':
+        return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', q, '-qp_p', q, '-qp_b', q]
+    return ['-c:v', 'libx264', '-preset', preset, '-crf', str(crf), '-pix_fmt', 'yuv420p']
+
+
+def video_encoder(cfg: dict) -> dict:
+    """Bộ mã hoá đã chọn (choose_video_encoder), chưa chọn thì libx264 theo config."""
+    if cfg.get('_video_encoder'):
+        return cfg['_video_encoder']
+    preset, crf = str(cfg.get('video_preset', 'veryfast')), int(cfg.get('video_crf', 21))
+    args = encoder_args('libx264', preset, crf)
+    return {'name': 'libx264', 'args': args, 'fallback': args}
+
+
+def _probe_video(video: Path) -> tuple:
+    """(rộng, cao, số giây) của luồng hình đầu tiên."""
+    rs = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                         '-show_entries', 'stream=width,height:format=duration',
+                         '-of', 'default=noprint_wrappers=1', str(video)],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace')
+    info = dict(line.split('=', 1) for line in rs.stdout.splitlines() if '=' in line)
+    try:
+        return int(info.get('width', 0)), int(info.get('height', 0)), float(info.get('duration', 0))
+    except ValueError:
+        return 0, 0, 0.0
+
+
+def _time_ffmpeg(cmd: list, cwd: Path, timeout: int = 180):
+    started = time.perf_counter()
+    try:
+        rs = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return time.perf_counter() - started if rs.returncode == 0 else None
+
+
+def choose_video_encoder(cfg: dict, video: Path, work: Path, log: Log) -> dict:
+    """Chạy thử vài giây trên chính video này với từng bộ mã hoá máy có, chọn cái nhanh nhất.
+
+    Kết quả nhớ trong videotrans/encoder_choice.json theo máy + độ phân giải, lần sau khỏi đo.
+    Không tin danh sách `ffmpeg -encoders`: máy có thể liệt kê h264_qsv mà chạy thật thì lỗi.
+    """
+    preset, crf = str(cfg.get('video_preset', 'veryfast')), int(cfg.get('video_crf', 21))
+    fallback = encoder_args('libx264', preset, crf)
+    wanted = str(cfg.get('video_encoder', 'auto')).strip().lower()
+
+    def result(name: str) -> dict:
+        return {'name': name, 'args': encoder_args(name, preset, crf), 'fallback': fallback}
+
+    if wanted != 'auto':
+        if wanted not in ('libx264',) + HW_ENCODERS:
+            log(f'  [CẢNH BÁO] video_encoder "{wanted}" không hỗ trợ, dùng libx264')
+            wanted = 'libx264'
+        log(f'  Mã hoá video: {wanted} (đặt cố định trong dub_all.config.json)')
+        return result(wanted)
+
+    width, height, duration = _probe_video(video)
+    version = subprocess.run(['ffmpeg', '-hide_banner', '-version'], capture_output=True, text=True,
+                             encoding='utf-8', errors='replace').stdout.split('\n', 1)[0]
+    listed = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'], capture_output=True, text=True,
+                            encoding='utf-8', errors='replace').stdout
+    candidates = ['libx264'] + [e for e in HW_ENCODERS if f' {e} ' in listed]
+    key = f'{platform.node()}|{width}x{height}|{preset}|{crf}|{version}|{",".join(candidates)}'
+    try:
+        cache = json.loads(ENCODER_CACHE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(key)
+    if isinstance(hit, dict) and hit.get('name') in candidates:
+        log(f'  Mã hoá video: {hit["name"]} (đã đo trên máy này: {hit.get("summary", "")})')
+        return result(hit['name'])
+
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'bench.srt').write_text('1\n00:00:00,000 --> 00:10:00,000\nSubtitle benchmark line\n\n',
+                                    encoding='utf-8')
+    subprocess.run(['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error', '-i', 'bench.srt', 'bench.ass'],
+                   cwd=str(work), capture_output=True)
+    seconds = max(1.0, min(6.0, duration - 0.5)) if duration else 6.0
+    start = max(0.0, min(duration * 0.4, duration - seconds - 0.5)) if duration else 0.0
+    head = ['ffmpeg', '-hide_banner', '-nostdin', '-loglevel', 'error', '-ss', f'{start:.2f}',
+            '-t', f'{seconds:.2f}', '-i', str(video), '-an', '-vf', "subtitles=filename='bench.ass'"]
+    log(f'  Đo tốc độ mã hoá trên máy này ({", ".join(candidates)}), chỉ làm lần đầu...')
+    # Lượt khởi động: lần đầu libass dựng cache font có thể mất vài giây, không tính vào bộ mã hoá nào
+    _time_ffmpeg(head + ['-f', 'null', '-'], work)
+    times = {name: _time_ffmpeg(head + encoder_args(name, preset, crf) + ['-f', 'null', '-'], work)
+             for name in candidates}
+    shutil.rmtree(work, ignore_errors=True)
+
+    summary = ', '.join(f'{n} {t:.1f}s' if t else f'{n} lỗi' for n, t in times.items())
+    base = times.get('libx264')
+    hw = [(t, n) for n, t in times.items() if n != 'libx264' and t]
+    name = 'libx264'
+    if hw:
+        best_t, best = min(hw)
+        if not base or best_t * HW_MIN_SPEEDUP <= base:
+            name = best
+    log(f'  Mã hoá video: {name} (đo {seconds:.0f}s video: {summary})')
+    if base or hw:  # đo hỏng hết thì không nhớ, lần sau đo lại
+        cache[key] = {'name': name, 'summary': summary, 'date': time.strftime('%Y-%m-%d')}
+        try:
+            ENCODER_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError:
+            pass
+    return result(name)
+
+
+# ---------------------------------------------------------------------------
+# Tách nhạc nền chạy nền, song song với bước dịch (dịch chỉ là chờ API, CPU đang rảnh)
+# ---------------------------------------------------------------------------
+def run_separate_worker(video: str, sep_dir: str, model: str) -> int:
+    """Tiến trình con (dub_all.py --separate-worker): tách video ra sep_dir/vocal.wav + instrument.wav.
+
+    Làm y như bước tách trong _stage_prepare để 25 ngôn ngữ dùng lại được qua seed_separated_audio.
+    Ghi ra file tạm rồi mới đổi tên: phase_dub coi instrument.wav có mặt là đã tách xong.
+    """
+    from videotrans.configure import config as vt_config
+    vt_config.init_run()
+    from videotrans.configure.config import settings
+    from videotrans.configure.contants import UVR_URL_MS, UVR_URL_HF
+    from videotrans.process._audio_separate import vocal_bgm
+    from videotrans.util.help_down import down_file_from_hf
+    from videotrans.util.help_misc import is_connect_hf
+
+    out = Path(sep_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    raw = out / '_raw_44100.wav'
+    subprocess.run(['ffmpeg', '-y', '-hide_banner', '-nostdin', '-loglevel', 'error', '-i', video,
+                    '-vn', '-ac', '2', '-ar', '44100', '-c:a', 'pcm_s16le', str(raw)], check=True)
+    model = model or settings.get('uvr_models') or 'UVR-MDX-NET-Inst_HQ_4'
+    prefix = UVR_URL_HF if is_connect_hf() else UVR_URL_MS
+    names = ['vocals.fp16.onnx', 'accompaniment.fp16.onnx'] if model.startswith('spleeter') else [f'{model}.onnx']
+    down_file_from_hf(str(ROOT_DIR / 'models' / 'onnx'), [prefix.replace('{}', n) for n in names])
+    vocal_tmp, instr_tmp = out / '_vocal.part.wav', out / '_instrument.part.wav'
+    print(f'Tách bằng {model}: {video}', flush=True)
+    started = time.time()
+    ok, err = vocal_bgm(input_file=str(raw), vocal_file=str(vocal_tmp), instr_file=str(instr_tmp),
+                        uvr_models=model)
+    raw.unlink(missing_ok=True)
+    if not ok or not vocal_tmp.exists() or not instr_tmp.exists():
+        print(f'Tách thất bại: {err}', flush=True)
+        return 1
+    os.replace(vocal_tmp, out / 'vocal.wav')
+    os.replace(instr_tmp, out / 'instrument.wav')
+    print(f'Xong sau {time.time() - started:.1f}s', flush=True)
+    return 0
+
+
+def _has_audio(video: Path) -> bool:
+    rs = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index',
+                         '-of', 'csv=p=0', str(video)], capture_output=True, text=True)
+    return bool(rs.stdout.strip())
+
+
+def start_separation(cfg: dict, video: Path, sep_dir: Path, logs_dir: Path, log: Log):
+    """Bắt đầu tách nhạc nền ở tiến trình riêng, trả về thread để phase_dub chờ (None nếu không cần)."""
+    if not cfg.get('is_separate') or not _has_audio(video):
+        return None
+    if (sep_dir / 'vocal.wav').exists() and (sep_dir / 'instrument.wav').exists():
+        return None
+    task_log = logs_dir / 'separate.log'
+
+    def work():
+        started = time.time()
+        cmd = [sys.executable, str(Path(__file__).resolve()), '--separate-worker',
+               str(video), str(sep_dir), str(cfg.get('uvr_model') or '')]
+        with task_log.open('a', encoding='utf-8') as fh:
+            fh.write(f'\n$ {" ".join(cmd)}\n')
+            fh.flush()
+            rc = subprocess.run(cmd, cwd=str(ROOT_DIR), stdout=fh, stderr=subprocess.STDOUT,
+                                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}).returncode
+        if rc == 0 and (sep_dir / 'instrument.wav').exists():
+            log(f'  Tách nhạc nền + SFX xong sau {fmt_duration(time.time() - started)}')
+        else:
+            log(f'  [CẢNH BÁO] Tách nhạc nền chạy trước bị lỗi (xem {task_log}) — '
+                f'sẽ tách lại ở ngôn ngữ đầu tiên')
+
+    log('  Tách nhạc nền + SFX chạy song song, trong lúc dịch / tạo giọng')
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    return thread
 
 
 def phase_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
@@ -557,6 +762,7 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
     if is_separate and not (sep_dir / 'instrument.wav').exists():
         log('  Giữ nhạc nền + SFX: sẽ tách nhạc khỏi giọng nói ở ngôn ngữ đầu tiên')
         log('  (chỉ tách 1 lần cho cả loạt, có thể mất vài phút với video dài)')
+    enc = video_encoder(cfg)
 
     def dub_one(i: int, lang: dict, quiet: bool) -> tuple:
         code = lang['code']
@@ -621,7 +827,20 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
                # kho giọng OmniVoice tạo sẵn (phase_tts_prefetch) — trúng thì không gọi Modal nữa
                'PYVIDEOTRANS_OMNIVOICE_STORE': str(out_dir.parent / '_tts'),
                # "omnivoice_voice": "native" trong languages: giọng bản xứ thay cho giọng mẫu tiếng Anh
-               'PYVIDEOTRANS_OMNIVOICE_VOICE': str(lang.get('omnivoice_voice', ''))}
+               'PYVIDEOTRANS_OMNIVOICE_VOICE': str(lang.get('omnivoice_voice', '')),
+               # bộ mã hoá đã đo chọn trên máy này (choose_video_encoder) + dự phòng libx264
+               'PYVIDEOTRANS_VIDEO_ENC': json.dumps(enc['args']),
+               'PYVIDEOTRANS_VIDEO_ENC_FALLBACK': json.dumps(enc['fallback']),
+               # không xuất thêm file .m4a tiếng gốc / tiếng lồng vào thư mục ngôn ngữ (không dùng tới)
+               'PYVIDEOTRANS_LEAN_OUTPUT': '1'}
+        if int(cfg.get('subtitle_type', 1)) in (1, 3) and not cfg.get('video_autorate'):
+            # đằng nào cũng mã hoá lại để nhúng phụ đề: đọc thẳng hình từ video gốc,
+            # khỏi tạo novoice.mp4 (bản sao cả video) cho từng ngôn ngữ
+            env['PYVIDEOTRANS_NOVOICE_DIRECT'] = '1'
+        if cfg.get('normalize_audio'):
+            # chuẩn hoá âm lượng ngay trên tiếng trước khi ghép hình, khỏi ghi lại cả video lần nữa
+            env['PYVIDEOTRANS_LOUDNORM'] = (f'{cfg.get("loudnorm_i", -14)}:{cfg.get("loudnorm_tp", -1.5)}'
+                                            f':{cfg.get("loudnorm_lra", 11)}')
         if is_separate and cfg.get('uvr_model'):
             env['PYVIDEOTRANS_UVR_MODEL'] = str(cfg['uvr_model'])
 
@@ -743,9 +962,7 @@ def phase_original(cfg: dict, video: Path, subs_dir: Path, workdir: Path, final_
         log(f'{head} — LỖI: không tạo được file phụ đề .ass')
         return 'failed'
 
-    settings = vt_config.settings
-    crf = str(settings.get('crf', 23))
-    preset = settings.get('preset', 'medium')
+    enc = video_encoder(cfg)
     tmp = work / f'{video.stem}.mp4'
     task_log = logs_dir / f'original-{code}.log'
 
@@ -756,14 +973,16 @@ def phase_original(cfg: dict, video: Path, subs_dir: Path, workdir: Path, final_
     base_cmd = ['ffmpeg', '-y', '-hide_banner', '-nostdin', '-i', str(video),
                 '-map', '0:v:0', '-map', '0:a?',
                 '-vf', f"subtitles=filename='{ass_file.name}'",
-                '-c:v', 'libx264', '-crf', crf, '-preset', preset, '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart']
-    # Ưu tiên chép nguyên luồng tiếng; nếu codec tiếng không hợp với mp4 thì mới mã hoá AAC
-    for audio_args in (['-c:a', 'copy'], ['-c:a', 'aac', '-b:a', '192k']):
+    # Bộ mã hoá đã chọn, hỏng thì libx264. Ưu tiên chép nguyên luồng tiếng; codec tiếng
+    # không hợp với mp4 thì mới mã hoá AAC.
+    encoders = [enc['args']] + ([enc['fallback']] if enc['fallback'] != enc['args'] else [])
+    for video_args, audio_args in ((v, a) for v in encoders
+                                   for a in (['-c:a', 'copy'], ['-c:a', 'aac', '-b:a', '192k'])):
+        cmd = base_cmd + video_args + audio_args + [str(tmp)]
         with task_log.open('a', encoding='utf-8') as fh:
-            fh.write(f'\n$ {" ".join(base_cmd + audio_args)} {tmp}\n')
-            rs = subprocess.run(base_cmd + audio_args + [str(tmp)], cwd=str(ass_file.parent),
-                                stdout=fh, stderr=subprocess.STDOUT)
+            fh.write(f'\n$ {" ".join(cmd)}\n')
+            rs = subprocess.run(cmd, cwd=str(ass_file.parent), stdout=fh, stderr=subprocess.STDOUT)
         if rs.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
             break
         tmp.unlink(missing_ok=True)
@@ -793,7 +1012,7 @@ def normalize_audio_track(video: Path, cfg: dict, log: Log, head: str) -> bool:
     base = f'loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}'
 
     probe = subprocess.run(
-        ['ffmpeg', '-hide_banner', '-nostats', '-i', str(video),
+        ['ffmpeg', '-hide_banner', '-nostats', '-i', str(video), '-vn',  # chỉ đo tiếng, khỏi giải mã hình
          '-af', f'{base}:print_format=json', '-f', 'null', '-'],
         capture_output=True, text=True, encoding='utf-8', errors='replace')
     blocks = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', probe.stderr, re.S)
@@ -832,7 +1051,14 @@ def finalize(cfg: dict, log: Log, head: str, produced: Path, lang_out: Path,
              final_dir: Path, lang: dict, video_stem: str) -> None:
     """Chuẩn hoá âm lượng, đưa sang final/ với tên tiếng Việt, rồi dọn thư mục trung gian."""
     if cfg.get('normalize_audio'):
-        normalize_audio_track(produced, cfg, log, head)
+        # cli.py đã chuẩn hoá ngay trên tiếng trước khi ghép hình (PYVIDEOTRANS_LOUDNORM) thì để lại
+        # loudnorm.json; không có (bản render cũ còn sót, hoặc đo lỗi) thì chuẩn hoá cả video như trước
+        marker = lang_out / 'loudnorm.json'
+        try:
+            measured = float(json.loads(marker.read_text(encoding='utf-8'))['input_i'])
+            log(f'{head} — âm lượng {measured:.1f} -> {cfg.get("loudnorm_i", -14)} LUFS')
+        except (OSError, ValueError, KeyError):
+            normalize_audio_track(produced, cfg, log, head)
 
     dest = final_dir / f'{final_stem(lang, video_stem)}{produced.suffix}'
     dest.unlink(missing_ok=True)  # bản cũ có thể là hardlink trỏ tới nội dung chưa chuẩn hoá
@@ -1066,11 +1292,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Chỉ chạy 1 pha')
     p.add_argument('--preview-styles', action='store_true',
                    help='Chỉ dựng ảnh xem trước style phụ đề rồi thoát')
+    # Nội bộ: tiến trình con tách nhạc nền chạy song song với bước dịch (start_separation)
+    p.add_argument('--separate-worker', nargs=3, metavar=('VIDEO', 'SEP_DIR', 'MODEL'),
+                   help=argparse.SUPPRESS)
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.separate_worker:
+        return run_separate_worker(*args.separate_worker)
     cfg = load_config(Path(args.config))
 
     if args.menu or not (args.video and args.srt):
@@ -1135,6 +1366,14 @@ def main() -> int:
 
         trans_results, dub_results = {}, {}
 
+        # Tách nhạc nền không cần bản dịch: bắt đầu ngay, chạy song song với dịch + tạo giọng
+        sep_thread = None
+        if args.only != 'translate' and langs:
+            try:
+                sep_thread = start_separation(cfg, video, workdir / '_separate', logs_dir, log)
+            except Exception as e:  # noqa: BLE001 - lỗi thì ngôn ngữ đầu tiên tự tách như cũ
+                log(f'  [CẢNH BÁO] Không chạy trước được bước tách nhạc nền ({e})')
+
         if args.only != 'dub':
             log('')
             log('[1/2] Dịch phụ đề...')
@@ -1148,6 +1387,12 @@ def main() -> int:
                     phase_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log)
                 except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
                     log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
+            pending = ([original_lang(cfg)] if with_original else []) + langs
+            if any(not find_final_video(final_dir, l, video.stem) for l in pending):
+                try:
+                    cfg['_video_encoder'] = choose_video_encoder(cfg, video, workdir / '_bench', log)
+                except Exception as e:  # noqa: BLE001 - đo lỗi thì dùng libx264 theo config
+                    log(f'  [CẢNH BÁO] Không đo được tốc độ mã hoá ({e}), dùng libx264')
             if with_original:
                 if not (subs_dir / f'{source_language}.srt').exists():
                     shutil.copy2(srt, subs_dir / f'{source_language}.srt')
@@ -1157,6 +1402,9 @@ def main() -> int:
                 except Exception as e:  # noqa: BLE001 - lỗi ở video gốc không được chặn 25 bản kia
                     log(f'  [gốc] {source_language} — LỖI: {e}')
                     dub_results[source_language] = 'failed'
+            if sep_thread and sep_thread.is_alive():
+                log('  Đang chờ tách nhạc nền + SFX xong...')
+                sep_thread.join()
             if langs:
                 dub_results.update(phase_dub(cfg, langs, video, subs_dir, out_dir, final_dir,
                                              style_dir, log, logs_dir))

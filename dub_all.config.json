@@ -9,7 +9,7 @@
   "video_autorate": false,
   "cuda": false,
 
-  "_giu_nhac_note": "is_separate=true: tach nhac nen + SFX ra khoi giong noi goc roi long tieng moi de len tren, giu nguyen nhac va tieng dong. Chi tach 1 lan cho ca loat.",
+  "_giu_nhac_note": "is_separate=true: tach nhac nen + SFX ra khoi giong noi goc roi long tieng moi de len tren, giu nguyen nhac va tieng dong. Chi tach 1 lan cho ca loat, chay song song voi buoc dich (log o logs/separate.log).",
   "is_separate": true,
   "backaudio_volume": 0.5,
   "_backaudio_volume_note": "Do to cua nhac nen duoi giong doc. Nhac nho qua thi tang len 1.2-1.6, nhac at giong thi ha xuong 0.4-0.6.",
@@ -28,15 +28,22 @@
   "retries": 2,
   "_tts_concurrency_note": "So cau Edge-TTS doc cung luc. Microsoft chan khi goi don dap: 10 cau cung luc thi ~40% cau hong. Cau hong van duoc doc lai tung cau mot sau do.",
   "tts_concurrency": 3,
-  "_dub_parallel_note": "Chi dung voi OmniVoice (GPU Modal): so video render cung luc tren may nay. \"auto\" = tu chon theo may (RAM < 12GB hoac CPU < 4 nhan: 1; co card NVIDIA: toi da 3; CPU manh: 2). Dat so (1, 2, 3...) de ep. Edge-TTS luon chay lan luot.",
+  "_dub_parallel_note": "Chi dung voi OmniVoice (GPU Modal): so video render cung luc tren may nay. \"auto\" = tu chon theo may (RAM < 12GB hoac CPU < 4 nhan: 1; ma hoa bang card do hoa: 2; libx264 + CPU >= 6 nhan + RAM >= 16GB: 2; con lai 1). Dat so (1, 2, 3...) de ep. Edge-TTS luon chay lan luot.",
   "dub_parallel": "auto",
   "_tts_prefetch_note": "OmniVoice + giong mau co dinh: tao san giong moi ngon ngu truoc khi render, bao nhieu luot 32 cau chay cung luc tren GPU Modal (moi luot 1 GPU, toi da 8 theo max_containers). GPU chay lien 1 mach roi tat -> it lan khoi dong, re hon.",
   "tts_prefetch_parallel": 8,
 
+  "_video_encoder_note": "Bo ma hoa video. Phu de nhung cung nen moi video bat buoc ma hoa lai toan bo hinh, day la khau lau nhat. \"auto\" = lan dau tu chay thu vai giay tren may nay roi nho lai (videotrans/encoder_choice.json): libx264 (CPU) hoac card do hoa (h264_nvenc / h264_qsv / h264_amf). Card chi duoc chon khi nhanh hon ro ret (>= 1.3 lan) vi file to hon, kem net hon. Ghi ten cu the de ep, vd \"libx264\".",
+  "video_encoder": "auto",
+  "_video_preset_note": "Toc do ma hoa cua libx264: veryfast nhanh gap ~2 lan slow. YouTube ma hoa lai sau khi upload nen slow khong dang. faster / medium = file nho hon nhung cham hon.",
+  "video_preset": "veryfast",
+  "_video_crf_note": "Chat luong hinh: so nho = net hon, file to hon. 20-21 hop de upload YouTube; 23 = file nho hon.",
+  "video_crf": 21,
+
   "_cleanup_note": "Xoa thu muc out/<ma> sau khi da co video trong final/ (video trong final/ khong bi anh huong vi dung hardlink).",
   "cleanup_out": true,
 
-  "_am_luong_note": "Chuan hoa am luong ve chuan YouTube (-14 LUFS) sau khi render. Chi ma hoa lai audio, video giu nguyen.",
+  "_am_luong_note": "Chuan hoa am luong ve chuan YouTube (-14 LUFS). Lam ngay tren tieng truoc khi ghep hinh, khong phai ghi lai ca video.",
   "normalize_audio": true,
   "loudnorm_i": -14,
   "loudnorm_tp": -1.5,

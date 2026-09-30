@@ -53,9 +53,11 @@ VERSION_FILE = ROOT_DIR / '.phienban'
 TOKEN_FILE = ROOT_DIR / 'update_token.txt'
 DUB_CONFIG = 'dub_all.config.json'
 # Giá trị riêng của từng máy trong dub_all.config.json, giữ lại khi cập nhật
-KEEP_DUB_VALUES = ('translate_type', 'translate_parallel', 'tts_type', 'tts_concurrency', 'dub_parallel', 'cuda')
+KEEP_DUB_VALUES = ('translate_type', 'translate_parallel', 'tts_type', 'tts_concurrency', 'dub_parallel', 'cuda',
+                   'video_encoder')
 # Không bao giờ ghi đè / xoá, kể cả khi lỡ có trên GitHub
-PROTECTED = {'videotrans/params.json', 'videotrans/cfg.json', 'update_token.txt', '.phienban'}
+PROTECTED = {'videotrans/params.json', 'videotrans/cfg.json', 'videotrans/encoder_choice.json', 'update_token.txt',
+             '.phienban'}
 PROTECTED_DIRS = ('.venv/', 'models/', 'output/', 'logs/', '.git/')
 DEP_FILES = ('pyproject.toml', 'uv.lock')
 
@@ -169,7 +171,7 @@ def merge_dub_config(new_raw: str) -> str:
     if not local.exists():
         return new_raw
     old_raw = local.read_text(encoding='utf-8')
-    value = r'(-?\d+|true|false|"auto")'
+    value = r'(-?\d+|true|false|"[\w.-]*")'  # số, true/false hoặc chuỗi ngắn ("auto", "libx264"...)
     for name in KEEP_DUB_VALUES:
         m = re.search(rf'"{name}"\s*:\s*{value}', old_raw)
         if m:
