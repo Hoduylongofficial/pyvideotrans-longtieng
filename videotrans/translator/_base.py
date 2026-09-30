@@ -12,6 +12,23 @@ from videotrans.task.taskcfg import SrtItem
 from videotrans.util.help_srt import get_subtitle_from_srt,cleartext
 from videotrans.util.help_misc import get_md5,serial
 
+
+def dub_timing_rule(lang_name: str) -> str:
+    """dub_all 设置 PYVIDEOTRANS_DUB_CPS（该语言正常语速，每秒字符数）时，附加到 {lang_prompt} 的时长预算规则。
+
+    译文过长 -> 配音超出字幕时长 -> 只能加速或重读，听感变差；让模型按时间轴控制长度更根本。
+    """
+    cps = os.environ.get('PYVIDEOTRANS_DUB_CPS', '').strip()
+    if not cps:
+        return ''
+    return (f"\n- **Timing budget (dubbing)**: the voice may speak from a block's start time until the next "
+            f"block's start time. A {lang_name} voice speaks about {cps} characters per second, so aim for at most "
+            f"about (that time in seconds x {cps}) characters per block. When a faithful translation is longer, "
+            f"shorten the wording (drop filler, use shorter synonyms). Meaning always wins over the budget: never "
+            f"drop numbers, currency or units (e.g. USDT, %), names, dates, comparisons, conditions, or "
+            f"warning/disclaimer content; a slightly long line is acceptable, a lost fact is not.\n")
+
+
 @dataclass
 class BaseTrans(BaseCon):
     # 翻译渠道

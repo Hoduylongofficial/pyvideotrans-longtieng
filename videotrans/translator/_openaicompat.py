@@ -13,7 +13,7 @@ from tenacity import before_log, retry_if_not_exception_type, wait_fixed, stop_a
 from videotrans.configure.excepts import NO_RETRY_EXCEPT, TranslateSrtError, LLMSegmentError, StopTask
 from videotrans.configure.config import logger, settings, params, ROOT_DIR, tr
 from videotrans.task.taskcfg import SrtItem
-from videotrans.translator._base import BaseTrans
+from videotrans.translator._base import BaseTrans, dub_timing_rule
 from videotrans.util._srt_parse import get_subtitle_from_srt, ms_to_time_string
 from videotrans.util.help_misc import get_prompt, get_tanslate_type
 
@@ -36,6 +36,8 @@ class OpenAICampat(BaseTrans):
         lang_prompt_file=f'{ROOT_DIR}/videotrans/prompts/language_prompts/{self.target_language_name}.txt'
         if Path(lang_prompt_file).exists():
             lang_prompt=Path(lang_prompt_file).read_text(encoding='utf-8')
+        if self.aisendsrt:  # 只有发送 SRT（带时间轴）时才有时长可参考
+            lang_prompt += dub_timing_rule(self.target_language_name)
         self.prompt = get_prompt(ainame=self.ainame,aisendsrt=self.aisendsrt).replace('{lang}',self.target_language_name).replace('{lang_prompt}',lang_prompt)
 
         try:

@@ -1,4 +1,5 @@
 import copy
+import os
 import re
 import shutil
 import time
@@ -68,6 +69,8 @@ class DubbingMixin:
             elif ref:
                 import hashlib
                 fixed_voice = 'fixed:' + hashlib.md5(Path(ref[0]).read_bytes() + ref[1].encode()).hexdigest()
+        use_store = self.cfg.tts_type == OMNIVOICE_TTS and bool(fixed_voice) \
+            and bool(os.environ.get('PYVIDEOTRANS_OMNIVOICE_STORE', '').strip())
         for i, it in enumerate(subs):
             if it['end_time'] < it['start_time'] or not it['text'].strip():
                 continue
@@ -100,7 +103,8 @@ class DubbingMixin:
                 "filename": f"{self.cfg.cache_folder}/{i}-{_key}.wav"
             }
             _dubbing_cache=f'{DUBBING_CACHE}/{_key}.wav'
-            if vail_file(_dubbing_cache):
+            # dub_all 的 OmniVoice 预生成仓库才是本视频的权威版本（可能按字幕时长重读过），不用旧的全局缓存
+            if vail_file(_dubbing_cache) and not use_store:
                 # 直接使用缓存
                 shutil.copy2(_dubbing_cache,tmp_dict['filename'])
             if str(voice).strip().lower() == 'clone' and self.cfg.tts_type in SUPPORT_CLONE:

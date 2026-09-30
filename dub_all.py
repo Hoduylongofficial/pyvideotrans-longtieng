@@ -380,6 +380,93 @@ def attempt(cfg: dict, log: Log, head: str, task_log: Path, cli_args: list,
 
 
 # ---------------------------------------------------------------------------
+# Kiểm tra bản dịch trước khi lồng tiếng — dịch hỏng mà vẫn render thì tốn giờ render + tiền GPU
+# ---------------------------------------------------------------------------
+# Tốc độ nói của giọng OmniVoice (ký tự/giây, tính cả dấu cách), làm "ngân sách" độ dài câu cho prompt dịch.
+# Đo thật (09/2026, video MEXC 98 câu, trung vị): de 18.2, es 18.3, ja 9.1. Các ngôn ngữ khác suy ra theo
+# độ dài chữ tương đối, chưa đo. Đặt thấp quá thì AI cắt mất ý (đã gặp: mất chữ "USDT", mất vế so sánh).
+# Hán/Nhật/Hàn mỗi ký tự là 1 âm tiết nên số nhỏ hơn nhiều. Ghi đè bằng "speech_cps" trong config.
+SPEECH_CPS = {'default': 17, 'de': 18, 'es': 18, 'it': 18, 'pt': 18, 'id': 18, 'ms': 18, 'fil': 18,
+              'ja': 9, 'zh': 6, 'ko': 8, 'th': 12, 'ar': 15, 'hi': 16, 'ru': 16, 'uk': 16, 'pl': 16,
+              'cs': 16, 'fi': 16, 'el': 16}
+# Hệ chữ riêng: câu dịch không có ký tự nào của hệ chữ này mà toàn chữ Latin = chưa dịch / sai ngôn ngữ
+SCRIPT_RE = {'ar': r'[؀-ۿ]', 'ja': r'[぀-ヿ一-鿿]', 'ko': r'[가-힯]',
+             'ru': r'[Ѐ-ӿ]', 'uk': r'[Ѐ-ӿ]', 'el': r'[Ͱ-Ͽ]',
+             'hi': r'[ऀ-ॿ]', 'th': r'[฀-๿]', 'zh': r'[一-鿿]'}
+# Từ tiếng Anh gần như không bao giờ xuất hiện trong câu tiếng Đức/Pháp/Tây Ban Nha... đã dịch
+# (bỏ "is", "was", "for", "to" vì trùng với tiếng Hà Lan / Bắc Âu)
+EN_WORDS = {'the', 'and', 'of', 'you', 'that', 'this', 'with', 'your', 'what', 'have', 'are', 'not',
+            'it', 'but', 'they', 'will', 'there', 'from', 'about', 'which', 'would', 'their'}
+LLM_JUNK = re.compile(r'</?(TRANSLATE_TEXT|INPUT|think)>|```|^\s*(here is|here\'s|translation\s*:)', re.I)
+QA_LABELS = {'empty': 'rỗng', 'junk': 'lẫn chữ thừa của AI', 'untranslated': 'chưa dịch (giống tiếng Anh)',
+             'script': 'sai hệ chữ', 'english': 'còn tiếng Anh', 'long': 'dài quá khung thời gian'}
+
+
+def speech_cps(cfg: dict, code: str) -> float:
+    table = {**SPEECH_CPS, **(cfg.get('speech_cps') or {})}
+    return float(table.get(code) or table.get(code.split('-')[0]) or table['default'])
+
+
+def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str) -> tuple:
+    """Soát bản dịch: ([(số câu, loại lỗi, nội dung)], nặng?). Loại 'long' chỉ để tham khảo.
+
+    Bản dịch luôn giữ đúng số câu + thời gian của bản gốc (check_target_sub); AI trả thiếu câu
+    thì câu đó thành rỗng -> "rỗng" là dấu hiệu chính của dịch hỏng.
+    """
+    from videotrans.util.help_srt import get_subtitle_from_srt
+    src = get_subtitle_from_srt(str(source_sub))
+    tgt = get_subtitle_from_srt(str(target_sub))
+    issues = []
+    if len(tgt) != len(src):
+        issues.append((0, 'empty', f'{len(tgt)}/{len(src)} câu'))
+    script = SCRIPT_RE.get(code) or SCRIPT_RE.get(code.split('-')[0])
+    latin_target = not script and code.split('-')[0] != 'en'
+    cps = speech_cps(cfg, code)
+
+    def words(text):
+        return re.findall(r"[^\W\d_]+", text.casefold())
+
+    for i, t in enumerate(tgt):
+        text = t['text'].strip()
+        s = src[i]['text'].strip() if i < len(src) else ''
+        kind = None
+        if not text:
+            kind = 'empty'
+        elif LLM_JUNK.search(text):
+            kind = 'junk'
+        elif code.split('-')[0] != 'en' and len(words(s)) >= 3 and words(text) == words(s):
+            kind = 'untranslated'
+        elif script and not re.search(script, text) and len(re.findall(r'[A-Za-z]', text)) >= 6:
+            kind = 'script'
+        elif latin_target and len(words(text)) >= 5 \
+                and sum(w in EN_WORDS for w in words(text)) / len(words(text)) >= 0.35:
+            kind = 'english'
+        else:
+            seconds = (t['end_time'] - t['start_time']) / 1000
+            if seconds > 0 and len(text) > seconds * cps * 1.6 + 10:
+                kind = 'long'
+        if kind:
+            issues.append((t['line'], kind, text[:120]))
+    bad = [x for x in issues if x[1] != 'long']
+    empty = sum(1 for x in bad if x[1] == 'empty')
+    severe = len(tgt) != len(src) or empty >= 3 or len(bad) >= max(3, 0.15 * max(1, len(src)))
+    return issues, severe
+
+
+def write_qa_report(path: Path, code: str, issues: list) -> None:
+    lines = [f'Soát bản dịch [{code}] — {time.strftime("%Y-%m-%d %H:%M:%S")}', '']
+    lines += [f'  câu {line:>4}  {QA_LABELS.get(kind, kind):<28} {text}' for line, kind, text in issues]
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def qa_summary(issues: list) -> str:
+    counts = {}
+    for _, kind, _ in issues:
+        counts[kind] = counts.get(kind, 0) + 1
+    return ', '.join(f'{n} {QA_LABELS.get(k, k)}' for k, n in counts.items())
+
+
+# ---------------------------------------------------------------------------
 # Pha 1 — dịch phụ đề
 # ---------------------------------------------------------------------------
 def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
@@ -398,15 +485,34 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
     # Mỗi request dịch tối đa llm_timeout (300s) x vài lần thử lại; im lặng lâu hơn thế là treo
     stall_timeout = float(cfg.get('translate_stall_minutes', 20)) * 60 or None
 
+    qa_on = bool(cfg.get('translate_qa', True))
+    from videotrans.util.help_srt import get_subtitle_from_srt
+    total_cues = len(get_subtitle_from_srt(str(source_sub)))
+
+    def qa(dest: Path, code: str) -> tuple:
+        issues, severe = check_translation(cfg, source_sub, dest, code)
+        report = logs_dir / f'qa-{code}.txt'
+        if issues:
+            write_qa_report(report, code, issues)
+        else:
+            report.unlink(missing_ok=True)
+        return issues, severe, report
+
     def translate_one(i: int, lang: dict, quiet: bool) -> tuple:
         code = lang['code']
         dest = subs_dir / f'{code}.srt'
         head = f'  [{i}/{total}] {code:<6} {lang.get("name", "")}'
         if dest.exists() and dest.stat().st_size > 0:
+            # Có thể do người dùng tự sửa -> chỉ cảnh báo, không tự dịch lại
+            if qa_on:
+                issues, severe, report = qa(dest, code)
+                if severe:
+                    log(f'{head} — đã có, nhưng [CẢNH BÁO] bản dịch hỏng nặng ({qa_summary(issues)}); '
+                        f'xoá {dest.name} rồi chạy lại để dịch lại. Chi tiết: {report}')
+                    return code, 'skipped'
             log(f'{head} — đã có, bỏ qua')
             return code, 'skipped'
 
-        log(f'{head} — đang dịch...')
         # translate_srt.py ghi ra {output-dir}/{tên file nguồn}.{mã ngôn ngữ}.srt
         # Mỗi ngôn ngữ một tên file riêng nên chạy song song không giẫm lên nhau.
         produced = subs_dir / f'{source_sub.stem}.{code}.srt'
@@ -418,19 +524,59 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
             '--translate_type', str(translate_type),
             '--output-dir', str(subs_dir),
         ]
-        try:
-            done = attempt(cfg, log, head, logs_dir / f'translate-{code}.log', cli_args,
-                           lambda: produced.exists() and produced.stat().st_size > 0,
-                           quiet=quiet, stall_timeout=stall_timeout)
-        except Exception as e:  # noqa: BLE001 - một ngôn ngữ hỏng không được làm sập cả loạt
-            log(f'{head} — LỖI: {e}')
+        # Ngân sách độ dài câu theo thời gian (prompt dịch): câu dịch vừa khung thì giọng đọc
+        # không phải tua nhanh / đọc lại
+        env = {'PYVIDEOTRANS_DUB_CPS': f'{speech_cps(cfg, code):g}'} \
+            if cfg.get('translate_timing_budget', False) else None
+        best = None  # (điểm, file, lỗi, nặng?)
+        tries = 2 if qa_on else 1
+        for n in range(1, tries + 1):
+            log(f'{head} — đang dịch...' if n == 1 else f'{head} — dịch lại lần {n}...')
+            produced.unlink(missing_ok=True)
+            try:
+                done = attempt(cfg, log, head, logs_dir / f'translate-{code}.log', cli_args,
+                               lambda: produced.exists() and produced.stat().st_size > 0,
+                               env=env, quiet=quiet, stall_timeout=stall_timeout)
+            except Exception as e:  # noqa: BLE001 - một ngôn ngữ hỏng không được làm sập cả loạt
+                log(f'{head} — LỖI: {e}')
+                done = False
+            if not done:
+                break
+            candidate = subs_dir / f'_{code}.lan{n}.srt'
+            produced.replace(candidate)
+            if not qa_on:
+                best = (0, candidate, [], False)
+                break
+            issues, severe = check_translation(cfg, source_sub, candidate, code)
+            bad = [x for x in issues if x[1] != 'long']
+            score = (severe, len(bad))
+            if best is None or score < best[0]:
+                best = (score, candidate, issues, severe)
+            # Lỗi lẻ tẻ 1-2 câu thì giữ (xem logs/qa-<mã>.txt); nhiều hơn thì dịch lại 1 lần
+            if not severe and len(bad) < max(2, 0.05 * total_cues):
+                break
+            if n < tries:
+                log(f'{head} — bản dịch có lỗi ({qa_summary(bad)}), dịch lại...')
+
+        if best is None:
+            log(f'{head} — LỖI (chi tiết: {logs_dir / f"translate-{code}.log"})')
             return code, 'failed'
-        if done:
-            produced.replace(dest)
-            log(f'{head} — xong')
-            return code, 'ok'
-        log(f'{head} — LỖI (chi tiết: {logs_dir / f"translate-{code}.log"})')
-        return code, 'failed'
+        for leftover in subs_dir.glob(f'_{code}.lan*.srt'):
+            if leftover != best[1]:
+                leftover.unlink(missing_ok=True)
+        _, candidate, issues, severe = best
+        if severe:
+            bad_dir = subs_dir / '_loi'
+            bad_dir.mkdir(exist_ok=True)
+            candidate.replace(bad_dir / f'{code}.srt')
+            issues, _, report = qa(bad_dir / f'{code}.srt', code)
+            log(f'{head} — LỖI: bản dịch hỏng nặng sau 2 lần dịch ({qa_summary(issues)}), '
+                f'bỏ qua lồng tiếng ngôn ngữ này. Chi tiết: {report}')
+            return code, 'failed'
+        candidate.replace(dest)
+        issues, _, report = qa(dest, code) if qa_on else ([], False, None)
+        log(f'{head} — xong' + (f' ({qa_summary(issues)} — xem {report.name})' if issues else ''))
+        return code, 'ok'
 
     # Dịch chỉ là chờ API, không tốn CPU/GPU, nên chạy song song nhiều ngôn ngữ
     # rút ngắn pha này gần như tuyến tính. Hạ xuống nếu nhà cung cấp chặn tần suất.
@@ -718,40 +864,105 @@ def start_separation(cfg: dict, video: Path, sep_dir: Path, logs_dir: Path, log:
     return thread
 
 
-def phase_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
-                       store: Path, log: Log) -> None:
-    """OmniVoice + giọng mẫu cố định: tạo sẵn giọng mọi ngôn ngữ trên GPU Modal, nhiều lượt cùng lúc.
+class TtsPrefetch:
+    """Tạo giọng chạy nền; phase_dub chờ riêng từng ngôn ngữ (ngôn ngữ nào xong giọng là render ngay)."""
 
-    GPU chạy liền 1 mạch rồi tắt (ít lần khởi động, không ngồi chờ máy này render), sau đó bước
-    render lấy giọng từ kho, không gọi Modal nữa. Nhái từng câu từ video thì không tạo sẵn được
-    (giọng mẫu cắt từ video trong lúc lồng tiếng) -> đọc trong lúc lồng tiếng như cũ.
+    def __init__(self):
+        self.ready = {}      # mã ngôn ngữ -> threading.Event
+        self.thread = None
+
+    def wait(self, code: str, log: Log, head: str) -> None:
+        event = self.ready.get(code)
+        if event and not event.is_set():
+            log(f'{head} — chờ tạo giọng trên GPU Modal...')
+            event.wait()
+
+    def join(self) -> None:
+        if self.thread:
+            self.thread.join()
+
+
+def prefetch_parallel(cfg: dict) -> int:
+    """Số lượt tạo giọng cùng lúc trên GPU Modal. "auto" = theo tốc độ render của máy này: GPU chỉ cần
+    tạo giọng nhanh hơn máy render là đủ, thêm GPU chỉ tốn thêm tiền khởi động. Đo thực tế (video
+    6 phút, 98 câu/ngôn ngữ): 4 GPU ~65 giây/ngôn ngữ; máy mạnh render 2 video cùng lúc ~30 giây/ngôn
+    ngữ -> cần 8, máy văn phòng render 1 video ~vài phút/ngôn ngữ -> 4 là dư."""
+    value = str(cfg.get('tts_prefetch_parallel', 'auto')).strip().lower()
+    if value.isdigit() and int(value) >= 1:
+        return int(value)
+    renders = render_parallel(cfg)
+    return min(8, 4 * max(1, renders))
+
+
+def subtitle_windows(items: list, video_seconds: float) -> dict:
+    """{câu: số giây giọng đọc được phép chiếm}, tính giống _rate.SpeedRate: từ đầu câu này tới
+    đầu câu sau (khoảng lặng giữa 2 câu cũng dùng được); câu cuối tới hết video. Câu lặp lại thì
+    lấy khung ngắn nhất."""
+    windows = {}
+    for i, it in enumerate(items):
+        end = items[i + 1]['start_time'] if i + 1 < len(items) else max(it['end_time'], video_seconds * 1000)
+        seconds = (end - it['start_time']) / 1000
+        windows[it['text']] = min(seconds, windows.get(it['text'], seconds))
+    return windows
+
+
+def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
+                       store: Path, log: Log) -> TtsPrefetch:
+    """OmniVoice + giọng mẫu cố định: tạo sẵn giọng mọi ngôn ngữ trên GPU Modal, chạy nền.
+
+    Ngôn ngữ nào tạo xong giọng thì render ngay trên máy này, song song với GPU tạo giọng ngôn ngữ
+    tiếp theo. Nhái từng câu từ video thì không tạo sẵn được (giọng mẫu cắt từ video trong lúc
+    lồng tiếng) -> đọc trong lúc lồng tiếng như cũ.
     """
+    job = TtsPrefetch()
     if int(cfg.get('tts_type', EDGE_TTS)) != OMNIVOICE_TTS:
-        return
+        return job
     from videotrans.tts._omnivoice_modal import fixed_ref, prefetch, remote_configured
     from videotrans.util.help_srt import get_subtitle_from_srt
     if not remote_configured() or not fixed_ref():
-        return
-    jobs = {}
+        return job
+    video_seconds = _probe_video(video)[2]
+    jobs, slots = {}, {}
     for lang in langs:
         sub = subs_dir / f'{lang["code"]}.srt'
         if find_final_video(final_dir, lang, video.stem) or not sub.exists():
             continue
         # Giống hệt cách _stage_dubbing lấy câu để đọc -> kho khớp đúng từng câu lúc render
-        jobs[lang['code']] = [it['text'] for it in get_subtitle_from_srt(str(sub))
-                              if it['end_time'] >= it['start_time'] and it['text'].strip()]
+        items = [it for it in get_subtitle_from_srt(str(sub))
+                 if it['end_time'] >= it['start_time'] and it['text'].strip()]
+        jobs[lang['code']] = [it['text'] for it in items]
+        slots[lang['code']] = subtitle_windows(items, video_seconds)
     if not jobs:
-        return
-    started = time.time()
-    native = {l['code'] for l in langs if str(l.get('omnivoice_voice', '')).lower() == 'native'}
-    res = prefetch(store, jobs, parallel=max(1, int(cfg.get('tts_prefetch_parallel', 8))), log=log,
-                   native=native & set(jobs))
-    done = sum(v[0] for v in res.values())
-    log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, {len(res)} ngôn ngữ')
+        return job
+    job.ready = {code: threading.Event() for code in jobs}
+    parallel = prefetch_parallel(cfg)
+    native ={l['code'] for l in langs if str(l.get('omnivoice_voice', '')).lower() == 'native'}
+
+    def run():
+        started = time.time()
+        try:
+            res = prefetch(store, jobs, parallel=parallel, log=log,
+                           native=native & set(jobs), slots=slots,
+                           fit_ratio=float(cfg.get('tts_fit_ratio', 1.2) or 0),
+                           on_ready=lambda code: job.ready[code].set())
+            done = sum(v[0] for v in res.values())
+            refit = sum(v[2] for v in res.values())
+            log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, '
+                f'{len(res)} ngôn ngữ' + (f', {refit} câu đọc lại cho vừa khung' if refit else ''))
+        except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
+            log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
+        finally:
+            for event in job.ready.values():
+                event.set()
+
+    job.thread = threading.Thread(target=run, daemon=True)
+    job.thread.start()
+    return job
 
 
 def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path,
-              final_dir: Path, style_dir: Path, log: Log, logs_dir: Path) -> dict:
+              final_dir: Path, style_dir: Path, log: Log, logs_dir: Path,
+              tts: TtsPrefetch = None) -> dict:
     source_language = cfg.get('source_language', 'en')
     source_sub = subs_dir / f'{source_language}.srt'
     sleep_between = float(cfg.get('sleep_between', 5))
@@ -784,6 +995,9 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
         if code != source_language and not (target_sub.exists() and target_sub.stat().st_size > 0):
             log(f'{head} — LỖI: thiếu phụ đề {target_sub.name}, bỏ qua')
             return code, 'failed'
+
+        if tts:
+            tts.wait(code, log, head)
 
         style_file = style_dir / f'{code}.json'
         style_file.write_text(json.dumps(style_for(cfg, code), ensure_ascii=False, indent=2),
@@ -1382,17 +1596,18 @@ def main() -> int:
         if args.only != 'translate':
             log('')
             log('[2/2] Lồng tiếng + nhúng phụ đề + render...')
-            if langs:
-                try:
-                    phase_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log)
-                except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
-                    log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
             pending = ([original_lang(cfg)] if with_original else []) + langs
             if any(not find_final_video(final_dir, l, video.stem) for l in pending):
                 try:
                     cfg['_video_encoder'] = choose_video_encoder(cfg, video, workdir / '_bench', log)
                 except Exception as e:  # noqa: BLE001 - đo lỗi thì dùng libx264 theo config
                     log(f'  [CẢNH BÁO] Không đo được tốc độ mã hoá ({e}), dùng libx264')
+            tts = TtsPrefetch()
+            if langs:
+                try:
+                    tts = start_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log)
+                except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
+                    log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
             if with_original:
                 if not (subs_dir / f'{source_language}.srt').exists():
                     shutil.copy2(srt, subs_dir / f'{source_language}.srt')
@@ -1407,7 +1622,8 @@ def main() -> int:
                 sep_thread.join()
             if langs:
                 dub_results.update(phase_dub(cfg, langs, video, subs_dir, out_dir, final_dir,
-                                             style_dir, log, logs_dir))
+                                             style_dir, log, logs_dir, tts=tts))
+                tts.join()
                 # Đủ video mọi ngôn ngữ thì kho giọng tạo sẵn hết tác dụng (~200 MB/video)
                 if cfg.get('cleanup_out', True) and all(find_final_video(final_dir, l, video.stem) for l in langs):
                     shutil.rmtree(workdir / '_tts', ignore_errors=True)

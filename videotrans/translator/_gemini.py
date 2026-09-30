@@ -6,7 +6,7 @@ from typing import List, Union
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_not_exception_type, before_log, after_log
 from videotrans.configure.excepts import NO_RETRY_EXCEPT, TranslateSrtError, StopTask
 from videotrans.configure.config import tr,settings,params,logger,ROOT_DIR
-from videotrans.translator._base import BaseTrans
+from videotrans.translator._base import BaseTrans, dub_timing_rule
 from google import genai
 from google.genai import types,errors
 from pathlib import Path
@@ -25,6 +25,8 @@ class Gemini(BaseTrans):
         lang_prompt_file=f'{ROOT_DIR}/videotrans/prompts/language_prompts/{self.target_language_name}.txt'
         if Path(lang_prompt_file).exists():
             lang_prompt=Path(lang_prompt_file).read_text(encoding='utf-8')
+        if self.aisendsrt:  # 只有发送 SRT（带时间轴）时才有时长可参考
+            lang_prompt += dub_timing_rule(self.target_language_name)
         self.prompt = get_prompt(ainame='gemini',aisendsrt=self.aisendsrt).replace('{lang}', self.target_language_name).replace('{lang_prompt}',lang_prompt)
         self.api_keys = [k.strip() for k in params.get('gemini_key', '').split(',') if k.strip()] or ['']
         # 随机起点，多个进程并行翻译时不会都挤在第一个 key 上

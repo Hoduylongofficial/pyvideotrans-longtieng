@@ -116,8 +116,10 @@ Bấm đúp `DOI_TTS.bat` (đóng `LONG_TIENG` trước):
 | 5 | [Chỉ máy quản trị] Deploy / cập nhật server trên Modal, tạo key |
 
 - OmniVoice chạy trên GPU của Modal (modal.com), máy nhân viên **không cần card đồ hoạ**,
-  không tải model. Đo thực tế (GPU L4): ~0.75 giây GPU/câu; video 257 câu ~4-6 phút/ngôn
-  ngữ, **~1.5-2 USD GPU cho cả 25 ngôn ngữ**. Gói Starter của Modal cho 30 USD/tháng.
+  không tải model. Đo lại 30/09/2026 (GPU L4, ~0,80 USD/giờ): **~2,3 giây GPU/câu với giọng mẫu
+  13 giây**, ~1 giây/câu với giọng bản xứ 4–8 giây — giọng mẫu càng dài càng tốn (đọc lại cả mẫu
+  mỗi câu). Video 6 phút (98 câu) × 25 ngôn ngữ ≈ **1 USD**; video 20 phút (~330 câu) ≈ **3–3,5 USD**,
+  cộng thêm ~5–20% cho các câu đọc lại cho vừa khung. Gói Starter của Modal cho 30 USD/tháng.
 - Giọng mẫu **cố định** cho giọng đều và chuẩn nhất: file 5-15 giây, 1 người nói, không
   nhạc nền. Nên gõ đúng lời trong file (bỏ trống thì server tự nghe ra lời).
 - Nhái **từng câu** thì giống người nói gốc nhất, nhưng câu gốc nào lẫn nhạc/tiếng ồn thì
@@ -141,9 +143,13 @@ Báo lỗi `sai key`: xin quản trị key mới rồi làm lại bước 2.
 
 Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
 
-1. **Tạo sẵn giọng** mọi ngôn ngữ trên GPU Modal, 8 lượt cùng lúc (`tts_prefetch_parallel`).
-   GPU chạy liền 1 mạch rồi tắt — ít lần khởi động, không ngồi chờ máy render. Âm thanh
-   lưu tạm ở `dubbing_<tên video>\_tts` (tự xoá khi đủ video mọi ngôn ngữ).
+1. **Tạo giọng** trên GPU Modal chạy nền, 4–8 lượt cùng lúc tuỳ sức render của máy (`tts_prefetch_parallel`), lần lượt
+   theo thứ tự ngôn ngữ. **Ngôn ngữ nào xong giọng là render ngay**, không chờ đủ cả loạt
+   (dòng `[de] tạo sẵn giọng xong` rồi tới `[x/25] de ... lồng tiếng`). Âm thanh lưu tạm ở
+   `dubbing_<tên video>\_tts` (tự xoá khi đủ video mọi ngôn ngữ).
+   - Câu nào giọng đọc dài hơn khung thời gian phụ đề quá 1,2 lần (`tts_fit_ratio`) thì GPU
+     đọc lại câu đó với thời lượng vừa khung — giọng nói nhanh tự nhiên thay vì bị tua nhanh
+     méo tiếng. Chỉ đọc lại những câu đó (dòng `... câu đọc lại cho vừa khung`).
 2. **Render** trên máy mình, số video cùng lúc tự chọn theo sức máy (`dub_parallel: "auto"`):
    RAM < 12 GB hoặc CPU < 4 nhân → 1 video; mã hoá bằng card đồ hoạ → 2; CPU ≥ 6 nhân và
    RAM ≥ 16 GB → 2; còn lại 1. Màn hình ghi rõ dòng `Máy này: ... -> render N video cùng lúc`.
@@ -267,6 +273,17 @@ report.md   <- bảng tổng kết, mở bằng Notepad
 logs/       <- nhật ký, chỉ cần khi có lỗi
 _separate/  <- nhạc nền đã tách, xoá được khi làm xong hẳn
 ```
+
+**Soát bản dịch tự động:** dịch xong mỗi ngôn ngữ, phần mềm soát câu rỗng, câu còn nguyên
+tiếng Anh, sai hệ chữ (vd tiếng Nhật mà toàn chữ Latin), chữ thừa của AI. Có lỗi thì ghi vào
+`logs/qa-<mã>.txt` và hiện ở dòng `xong (... — xem qa-<mã>.txt)`. Lỗi nhiều thì tự dịch lại
+1 lần; vẫn hỏng nặng thì **bỏ qua lồng tiếng ngôn ngữ đó** (khỏi tốn render + tiền GPU), file
+dịch hỏng để ở `subs/_loi/` — chạy lại `LONG_TIENG.bat` để dịch lại.
+
+Tuỳ chọn `translate_timing_budget` (mặc định tắt) nhắc AI dịch câu ngắn cho vừa thời gian. Đo
+thử trên video MEXC (tiếng Đức, 98 câu): không nhắc thì chỉ 3 câu vượt khung — bằng khi nhắc —
+mà khi nhắc AI còn cắt mất ý (mất chữ "USDT", mất vế so sánh). Câu dài đã có bước GPU đọc lại
+cho vừa khung lo: sau bước đó không câu nào phải tua nhanh quá 1,1 lần.
 
 Tên file trong `final/` dạng `Tây Ban Nha (es) - tên video.mp4`. Bản gốc có tên
 `Anh (gốc) (en) - tên video.mp4` (đổi tên hiển thị hoặc tắt hẳn ở mục `original_video` trong

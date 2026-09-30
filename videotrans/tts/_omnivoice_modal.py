@@ -11,7 +11,7 @@ import io
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -259,58 +259,162 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
     return ok, err
 
 
-def prefetch(store: Path, jobs: dict, parallel: int = 8, log=print, native: set = frozenset()) -> dict:
+def _spoken_seconds(raw: bytes) -> float:
+    """配音在 pyvideotrans 里实际占用的时长：remove_silence_wav 按 -50 dBFS 去掉首尾静音，
+    再补 80ms + 400ms 缓冲。这里按同样规则估算，用来判断是否超出字幕可用时长。"""
+    import numpy as np
+    import soundfile as sf
+    wav, sr = sf.read(io.BytesIO(raw), dtype='float32', always_2d=True)
+    x = wav.mean(axis=1)
+    total = len(x) / sr
+    hop = max(1, int(sr * 0.01))
+    n = len(x) // hop
+    if n == 0:
+        return total
+    rms = np.sqrt((x[:n * hop].reshape(n, hop) ** 2).mean(axis=1)) + 1e-9
+    loud = np.where(20 * np.log10(rms) > -50)[0]
+    if len(loud) == 0:
+        return total
+    return min(total, (loud[-1] - loud[0] + 1) * 0.01 + 0.48)
+
+
+def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set = frozenset(),
+             slots: dict = None, fit_ratio: float = 0, on_ready=None) -> dict:
     """固定参考音色下，把 {语言: [文本,...]} 全部预先合成进仓库；native 中的语言用本地口音音色。
 
-    所有语言的分块放进同一个线程池，保持 parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器），
-    GPU 连续满载后一起空闲关机，比逐语言边合成边渲染少很多冷启动和空等。返回 {语言: (完成, 失败)}。
+    parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器）。任务按语言顺序优先：前面的语言先合成完，
+    on_ready(lang) 立即通知 dub_all 开始渲染该语言，不必等所有语言合成完（渲染在本机，比 GPU 慢得多）。
+
+    slots={语言: {文本: 可用秒数}} 且 fit_ratio>0 时：某句配音比可用时长长出 fit_ratio 倍以上，
+    用 OmniVoice 的 duration 参数按可用时长重读该句（模型自然地说快一些），比事后用 rubberband
+    硬加速自然得多；只重读超长的句子，不重读整批。返回 {语言: (完成, 失败, 重读)}。
     """
+    import queue
     fixed = fixed_ref()
     if not fixed:
         return {}
     url, key = str(params['omnivoice_modal_url']).strip(), str(params['omnivoice_modal_key']).strip()
     store.mkdir(parents=True, exist_ok=True)
+    slots = slots or {}
     # 每种语言一个参考音色：默认固定参考音色，native 语言用本地口音参考音频
     lang_ref = {lang: (native_ref(lang, jobs[lang], url, key) if lang in native else fixed) for lang in jobs}
     encoded = {r: _encode_ref(r[0]) for r in set(lang_ref.values())}
-    lang_rid = {lang: _ref_id(*r) for lang, r in lang_ref.items()}
-    rid_for = lang_rid.get
-    result, lock = {}, threading.Lock()
-    tasks = []
+    rid_for = {lang: _ref_id(*r) for lang, r in lang_ref.items()}.get
+    order = {lang: i for i, lang in enumerate(jobs)}
+    result = {lang: [0, 0, 0] for lang in jobs}
+    lock = threading.Lock()
+    tasks = queue.PriorityQueue()   # (优先级, 序号, 类型, 语言, 句子)：重读 > 按语言顺序的合成
+    seq = iter(range(10 ** 9))
+    left = {}                       # 语言 -> 未完成的任务数
+    done_langs = set()
+
+    def post(lang, items):
+        r = lang_ref[lang]
+        return _post(url, key, {'refs': {'r1': {'audio': encoded[r], 'text': r[1]}},
+                                'items': [dict(it, ref='r1', language=lang) for it in items]})
+
+    def ready(lang):
+        if lang in done_langs:
+            return
+        done_langs.add(lang)
+        ok, err, refit = result[lang]
+        extra = f', {refit} câu đọc lại cho vừa khung' if refit else ''
+        log(f'  [{lang}] tạo sẵn giọng xong: {ok}/{len(set(jobs[lang]))} câu{extra}')
+        if on_ready:
+            on_ready(lang)
+
+    def plan_fit(lang) -> list:
+        """该语言合成完后找出超长的句子：[(文本, 请求时长, 原占用时长)]"""
+        if fit_ratio <= 0 or not slots.get(lang):
+            return []
+        out = []
+        for text, window in slots[lang].items():
+            f = _store_file(store, lang, rid_for(lang), text)
+            if not f.is_file() or window <= 0:
+                continue
+            spoken = _spoken_seconds(f.read_bytes())
+            if spoken > window * fit_ratio:
+                speech = spoken - 0.48
+                # 目标：去静音+缓冲后正好放进可用时长；最多让模型说快 1.6 倍，剩下的交给 rubberband
+                out.append((text, round(max(window - 0.4, speech / 1.6, 0.5), 2), spoken))
+        return out
+
+    def finish_task(lang, kind):
+        left[lang] -= 1
+        if left[lang] > 0:
+            return
+        if kind == 'synth':
+            fits = plan_fit(lang)
+            if fits:
+                chunks = [fits[i:i + BATCH] for i in range(0, len(fits), BATCH)]
+                left[lang] = len(chunks)
+                for c in chunks:
+                    tasks.put((0, next(seq), 'fit', lang, c))
+                return
+        ready(lang)
+
     for lang, texts in jobs.items():
         need = list(dict.fromkeys(t for t in texts if t.strip() and not _store_file(store, lang, rid_for(lang), t).is_file()))
-        result[lang] = [len(set(texts)) - len(need), 0]
-        tasks += [(lang, need[i:i + BATCH]) for i in range(0, len(need), BATCH)]
-    left = {lang: sum(1 for l, _ in tasks if l == lang) for lang in jobs}
-    if not tasks:
-        return {k: tuple(v) for k, v in result.items()}
-    log(f'  Tạo sẵn giọng: {sum(len(c) for _, c in tasks)} câu, {len(tasks)} lượt, {parallel} lượt chạy cùng lúc trên GPU Modal')
+        result[lang][0] = len(set(texts)) - len(need)
+        chunks = [need[i:i + BATCH] for i in range(0, len(need), BATCH)]
+        left[lang] = len(chunks)
+        for c in chunks:
+            tasks.put((1 + order[lang], next(seq), 'synth', lang, c))
+    total = sum(left.values())
+    if total:
+        log(f'  Tạo sẵn giọng: {total} lượt, {parallel} lượt chạy cùng lúc trên GPU Modal '
+            f'(ngôn ngữ nào xong là render ngay)')
+    for lang in jobs:  # 已全部在仓库中的语言：检查一下超长句后即可渲染
+        if left[lang] == 0:
+            left[lang] = 1
+            finish_task(lang, 'synth')
 
-    def run(lang, chunk):
-        r = lang_ref[lang]
-        data = _post(url, key, {'refs': {'r1': {'audio': encoded[r], 'text': r[1]}},
-                                'items': [{'text': t, 'ref': 'r1', 'language': lang} for t in chunk]})
-        got = 0
-        for t, audio in zip(chunk, data.get('audios', [])):
-            raw = base64.b64decode(audio)
-            if _valid_audio(raw):  # rỗng thì không lưu: lúc render sẽ tự đọc lại câu đó
-                _store_file(store, lang, rid_for(lang), t).write_bytes(raw)
-                got += 1
-        return lang, got, len(chunk)
+    def worker():
+        while True:
+            try:
+                _, _, kind, lang, chunk = tasks.get(timeout=0.5)
+            except queue.Empty:
+                with lock:
+                    if all(v <= 0 for v in left.values()):
+                        return
+                continue
+            try:
+                if kind == 'synth':
+                    data = post(lang, [{'text': t} for t in chunk])
+                    got = 0
+                    for t, audio in zip(chunk, data.get('audios', [])):
+                        raw = base64.b64decode(audio)
+                        if _valid_audio(raw):  # rỗng thì không lưu: lúc render sẽ tự đọc lại câu đó
+                            _store_file(store, lang, rid_for(lang), t).write_bytes(raw)
+                            got += 1
+                    with lock:
+                        result[lang][0] += got
+                        result[lang][1] += len(chunk) - got
+                else:
+                    data = post(lang, [{'text': t, 'duration': d} for t, d, _ in chunk])
+                    better = 0
+                    for (t, _, old), audio in zip(chunk, data.get('audios', [])):
+                        raw = base64.b64decode(audio)
+                        # 只有确实变短了才替换，模型偶尔会读坏或不按时长
+                        if _valid_audio(raw) and _spoken_seconds(raw) < old:
+                            _store_file(store, lang, rid_for(lang), t).write_bytes(raw)
+                            better += 1
+                    with lock:
+                        result[lang][2] += better
+            except Exception as e:  # noqa: BLE001 - lượt lỗi: khi render sẽ tự gọi lại Modal cho câu thiếu
+                with lock:
+                    if kind == 'synth':
+                        result[lang][1] += len(chunk)
+                log(f'  [{lang}] tạo sẵn giọng: 1 lượt lỗi ({e}) — lúc render sẽ tự đọc bù')
+            finally:
+                with lock:
+                    finish_task(lang, kind)
 
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        futs = {pool.submit(run, lang, chunk): lang for lang, chunk in tasks}
-        for fut in as_completed(futs):
-            lang = futs[fut]
-            with lock:
-                try:
-                    _, got, want = fut.result()
-                    result[lang][0] += got
-                    result[lang][1] += want - got
-                except Exception as e:  # noqa: BLE001 - lượt lỗi: khi render sẽ tự gọi lại Modal cho câu thiếu
-                    result[lang][1] += 1
-                    log(f'  [{lang}] tạo sẵn giọng: 1 lượt lỗi ({e}) — lúc render sẽ tự đọc bù')
-                left[lang] -= 1
-                if left[lang] == 0:
-                    log(f'  [{lang}] tạo sẵn giọng xong: {result[lang][0]}/{len(set(jobs[lang]))} câu')
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, parallel))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for lang in jobs:  # 出错也要放行，渲染时会自己补读缺的句子
+        ready(lang)
     return {k: tuple(v) for k, v in result.items()}
