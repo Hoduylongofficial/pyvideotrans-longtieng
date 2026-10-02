@@ -17,6 +17,7 @@ from pathlib import Path
 import requests
 
 from videotrans.configure.config import logger, params, ROOT_DIR
+from videotrans.tts._dub_text import heard_too_long, similarity, speak_text
 
 BATCH = 32          # 每次请求的句数（服务端 GPU 一次批量 16 句）
 SR = 24000
@@ -178,6 +179,8 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
     store = _store_dir()
     todo = [it for it in queue_tts if it.get('text', '').strip() and not vail_file(it['filename'])]
     ok = len(queue_tts) - len(todo)
+    # Chữ thực sự đọc (phat_am.json, số -> chữ); phụ đề vẫn giữ nguyên. Kho tạo sẵn khoá theo bản này
+    spoken = {id(it): speak_text(it['text'], language) for it in todo}
     err = 0
 
     def ref_of(it):
@@ -208,7 +211,7 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
         for it in todo:
             rid = rid_of(it)
             if rid:
-                f = _store_file(store, language, rid, it['text'])
+                f = _store_file(store, language, rid, spoken[id(it)])
                 if f.is_file():
                     raw = f.read_bytes()
                     if _valid_audio(raw):
@@ -230,7 +233,7 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
         ids, items = {}, []
         for it in chunk:
             path, text = ref_of(it)
-            item = {'text': it['text'], 'language': language}
+            item = {'text': spoken[id(it)], 'language': language}
             if path and Path(path).is_file():
                 item['ref'] = ids.setdefault((path, text), f'r{len(ids)}')
             items.append(item)
@@ -250,7 +253,7 @@ def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None)
                 rid = rid_of(it) if store else None
                 if rid:
                     store.mkdir(parents=True, exist_ok=True)
-                    _store_file(store, language, rid, it['text']).write_bytes(raw)
+                    _store_file(store, language, rid, spoken[id(it)]).write_bytes(raw)
                 ok += 1
             except Exception as e:  # noqa: BLE001
                 logger.warning(f'OmniVoice Modal: câu lỗi {it.get("line")}: {e}')
@@ -278,16 +281,60 @@ def _spoken_seconds(raw: bytes) -> float:
     return min(total, (loud[-1] - loud[0] + 1) * 0.01 + 0.48)
 
 
+# Whisper nghe lại cả ngôn ngữ mà điểm trung vị dưới mức này = lỗi hệ thống, không phải câu hỏng lẻ:
+# giọng mẫu tiếng Anh làm đọc lơ lớ (đo 10/2026: th 0.63, hi 0.77) hoặc Whisper yếu ngôn ngữ đó. Đọc lại
+# không sửa được -> không đọc lại (đỡ tốn GPU), chỉ báo. Ngôn ngữ ổn có trung vị 0.92-1.00.
+QC_HEALTHY_MEDIAN = 0.85
+QC_MIN_SAMPLE = 8
+
+
+def _median(values):
+    v = sorted(values)
+    return v[len(v) // 2] if len(v) >= QC_MIN_SAMPLE else None
+
+
+def _qc_file(f: Path) -> Path:
+    return f.with_suffix('.qc.json')
+
+
+def _read_qc(f: Path):
+    """(lời Whisper nghe lại, điểm) đã lưu cạnh file giọng; chưa kiểm thì None"""
+    import json
+    try:
+        d = json.loads(_qc_file(f).read_text(encoding='utf-8'))
+        return d.get('heard', ''), float(d['score'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save(f: Path, raw: bytes, qc=None) -> None:
+    import json
+    f.write_bytes(raw)
+    if qc:
+        _qc_file(f).write_text(json.dumps({'heard': qc[0], 'score': round(qc[1], 3)}, ensure_ascii=False),
+                               encoding='utf-8')
+    else:
+        _qc_file(f).unlink(missing_ok=True)
+
+
 def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set = frozenset(),
-             slots: dict = None, fit_ratio: float = 0, on_ready=None) -> dict:
+             slots: dict = None, fit_ratio: float = 0, on_ready=None,
+             qc_min: float = 0, qc_retries: int = 2, on_qc=None) -> dict:
     """固定参考音色下，把 {语言: [文本,...]} 全部预先合成进仓库；native 中的语言用本地口音音色。
 
     parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器）。任务按语言顺序优先：前面的语言先合成完，
     on_ready(lang) 立即通知 dub_all 开始渲染该语言，不必等所有语言合成完（渲染在本机，比 GPU 慢得多）。
 
-    slots={语言: {文本: 可用秒数}} 且 fit_ratio>0 时：某句配音比可用时长长出 fit_ratio 倍以上，
-    用 OmniVoice 的 duration 参数按可用时长重读该句（模型自然地说快一些），比事后用 rubberband
-    硬加速自然得多；只重读超长的句子，不重读整批。返回 {语言: (完成, 失败, 重读)}。
+    Mỗi ngôn ngữ đi qua: synth -> redo (tối đa qc_retries vòng) -> fit -> ready.
+    - qc_min > 0: server cho Whisper nghe lại từng câu vừa đọc; câu nào giống câu yêu cầu dưới qc_min
+      (đọc sót, lặp, sai thứ tiếng, ra tiếng ậm ừ) thì đọc lại, giữ bản điểm cao nhất. Câu vẫn lệch sau
+      các vòng đọc lại được báo qua on_qc(lang, [(câu, nghe được, điểm)], trung vị) để người dùng nghe kiểm.
+      Cả ngôn ngữ nghe ra lệch (trung vị < QC_HEALTHY_MEDIAN) thì không đọc lại, trung vị báo kèm.
+    - slots={语言: {文本: 可用秒数}} 且 fit_ratio>0 时：某句配音比可用时长长出 fit_ratio 倍以上，
+      用 OmniVoice 的 duration 参数按可用时长重读该句（模型自然地说快一些），比事后用 rubberband
+      硬加速自然得多；只重读超长的句子，不重读整批。
+    Câu phụ đề được đổi sang chữ thực sự đọc (speak_text) trước khi tra kho / gửi đi, giống hệt
+    synthesize_remote. 返回 {语言: (完成, 失败, 重读, 听写后重读改善)}。
     """
     import queue
     fixed = fixed_ref()
@@ -295,33 +342,97 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         return {}
     url, key = str(params['omnivoice_modal_url']).strip(), str(params['omnivoice_modal_key']).strip()
     store.mkdir(parents=True, exist_ok=True)
-    slots = slots or {}
+    # Chữ thực sự đọc; khung thời gian theo câu phụ đề tương ứng (trùng thì lấy khung ngắn nhất)
+    spoken_jobs, spoken_slots = {}, {}
+    for lang, texts in jobs.items():
+        spoken_jobs[lang] = [speak_text(t, lang) for t in texts]
+        win = {}
+        for t, window in (slots or {}).get(lang, {}).items():
+            k = speak_text(t, lang)
+            win[k] = min(window, win.get(k, window))
+        spoken_slots[lang] = win
+    jobs, slots = spoken_jobs, spoken_slots
     # 每种语言一个参考音色：默认固定参考音色，native 语言用本地口音参考音频
     lang_ref = {lang: (native_ref(lang, jobs[lang], url, key) if lang in native else fixed) for lang in jobs}
     encoded = {r: _encode_ref(r[0]) for r in set(lang_ref.values())}
     rid_for = {lang: _ref_id(*r) for lang, r in lang_ref.items()}.get
     order = {lang: i for i, lang in enumerate(jobs)}
-    result = {lang: [0, 0, 0] for lang in jobs}
+    result = {lang: [0, 0, 0, 0] for lang in jobs}
     lock = threading.Lock()
     tasks = queue.PriorityQueue()   # (优先级, 序号, 类型, 语言, 句子)：重读 > 按语言顺序的合成
     seq = iter(range(10 ** 9))
     left = {}                       # 语言 -> 未完成的任务数
+    phase = {lang: 'synth' for lang in jobs}
+    rounds = {lang: 0 for lang in jobs}
+    scored = {lang: {} for lang in jobs}   # câu đọc trong lần chạy này -> điểm (chỉ những câu này mới đọc lại)
     done_langs = set()
+
+    def file_of(lang, text):
+        return _store_file(store, lang, rid_for(lang), text)
 
     def post(lang, items):
         r = lang_ref[lang]
-        return _post(url, key, {'refs': {'r1': {'audio': encoded[r], 'text': r[1]}},
-                                'items': [dict(it, ref='r1', language=lang) for it in items]})
+        body = {'refs': {'r1': {'audio': encoded[r], 'text': r[1]}},
+                'items': [dict(it, ref='r1', language=lang) for it in items]}
+        if qc_min > 0:
+            body['asr'] = True
+        return _post(url, key, body)
+
+    def outputs(lang, texts, data):
+        """[(câu, raw, (nghe được, điểm) hoặc None)] theo đúng thứ tự texts; câu rỗng -> raw None"""
+        heard = data.get('heard') or []
+        out = []
+        for n, (t, audio) in enumerate(zip(texts, data.get('audios', []))):
+            raw = base64.b64decode(audio)
+            if not _valid_audio(raw):   # rỗng thì không lưu: lúc render sẽ tự đọc lại câu đó
+                out.append((t, None, None))
+                continue
+            # Chấm trên toàn bộ lời nghe được (lặp vòng thì điểm thấp), chỉ lưu đoạn đầu cho báo cáo
+            qc = (heard[n][:300], similarity(t, heard[n], lang)) if n < len(heard) else None
+            out.append((t, raw, qc))
+        # Whisper hay tự lặp vòng / bịa câu ("Υπότιτλοι AUTHORWAVE...") trên âm thanh bình thường. Nghe ra
+        # dài gấp đôi câu mà âm thanh không dài bất thường (tốc độ đọc >= 0.6 trung vị cả lượt) = Whisper
+        # hỏng, không phải TTS lặp -> không chấm câu đó (không đọc lại, không báo). Đo 10/2026 (el):
+        # câu Whisper ra 300 ký tự lặp có âm thanh 2.8s / khung 3.0s.
+        rates = {t: len(t) / max(_spoken_seconds(raw) - 0.48, 0.1) for t, raw, _ in out if raw}
+        med = sorted(rates.values())[len(rates) // 2] if len(rates) >= 4 else None
+        for i, (t, raw, qc) in enumerate(out):
+            if qc and med and rates[t] >= 0.6 * med and heard_too_long(t, qc[0], lang):
+                out[i] = (t, raw, None)
+        return out
 
     def ready(lang):
         if lang in done_langs:
             return
         done_langs.add(lang)
-        ok, err, refit = result[lang]
+        ok, err, refit, fixed_n = result[lang]
         extra = f', {refit} câu đọc lại cho vừa khung' if refit else ''
+        if fixed_n:
+            extra += f', {fixed_n} câu đọc lại vì nghe sai'
+        bad, med = [], None
+        if qc_min > 0:
+            checked = [(t, _read_qc(file_of(lang, t))) for t in dict.fromkeys(jobs[lang])]
+            checked = [(t, qc) for t, qc in checked if qc]
+            bad = [(t, qc[0], qc[1]) for t, qc in checked if qc[1] < qc_min]
+            med = _median([qc[1] for _, qc in checked])
+            if med is not None and med < QC_HEALTHY_MEDIAN:
+                extra += f', Whisper nghe cả ngôn ngữ lệch (trung vị {med:.2f}) — có thể giọng lơ lớ'
+            elif bad:
+                extra += f', {len(bad)} câu nghe lại vẫn lệch'
         log(f'  [{lang}] tạo sẵn giọng xong: {ok}/{len(set(jobs[lang]))} câu{extra}')
+        if on_qc and qc_min > 0:
+            on_qc(lang, bad, med)
         if on_ready:
             on_ready(lang)
+
+    def plan_redo(lang) -> list:
+        """Câu đọc trong lần chạy này mà Whisper nghe ra lệch"""
+        if qc_min <= 0 or rounds[lang] >= qc_retries:
+            return []
+        med = _median(scored[lang].values())
+        if med is not None and med < QC_HEALTHY_MEDIAN:
+            return []
+        return [t for t, score in scored[lang].items() if score < qc_min]
 
     def plan_fit(lang) -> list:
         """该语言合成完后找出超长的句子：[(文本, 请求时长, 原占用时长)]"""
@@ -329,7 +440,7 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
             return []
         out = []
         for text, window in slots[lang].items():
-            f = _store_file(store, lang, rid_for(lang), text)
+            f = file_of(lang, text)
             if not f.is_file() or window <= 0:
                 continue
             spoken = _spoken_seconds(f.read_bytes())
@@ -339,35 +450,41 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 out.append((text, round(max(window - 0.4, speech / 1.6, 0.5), 2), spoken))
         return out
 
-    def finish_task(lang, kind):
+    def enqueue(lang, kind, items, priority):
+        chunks = [items[i:i + BATCH] for i in range(0, len(items), BATCH)]
+        left[lang] = len(chunks)
+        phase[lang] = kind
+        for c in chunks:
+            tasks.put((priority, next(seq), kind, lang, c))
+
+    def finish_task(lang):
         left[lang] -= 1
         if left[lang] > 0:
             return
-        if kind == 'synth':
+        if phase[lang] in ('synth', 'redo'):
+            redo = plan_redo(lang)
+            if redo:
+                rounds[lang] += 1
+                enqueue(lang, 'redo', redo, 0)
+                return
             fits = plan_fit(lang)
             if fits:
-                chunks = [fits[i:i + BATCH] for i in range(0, len(fits), BATCH)]
-                left[lang] = len(chunks)
-                for c in chunks:
-                    tasks.put((0, next(seq), 'fit', lang, c))
+                enqueue(lang, 'fit', fits, 0)
                 return
         ready(lang)
 
     for lang, texts in jobs.items():
-        need = list(dict.fromkeys(t for t in texts if t.strip() and not _store_file(store, lang, rid_for(lang), t).is_file()))
+        need = list(dict.fromkeys(t for t in texts if t.strip() and not file_of(lang, t).is_file()))
         result[lang][0] = len(set(texts)) - len(need)
-        chunks = [need[i:i + BATCH] for i in range(0, len(need), BATCH)]
-        left[lang] = len(chunks)
-        for c in chunks:
-            tasks.put((1 + order[lang], next(seq), 'synth', lang, c))
+        enqueue(lang, 'synth', need, 1 + order[lang])
     total = sum(left.values())
     if total:
         log(f'  Tạo sẵn giọng: {total} lượt, {parallel} lượt chạy cùng lúc trên GPU Modal '
-            f'(ngôn ngữ nào xong là render ngay)')
+            f'(ngôn ngữ nào xong là render ngay)' + (', Whisper nghe lại từng câu' if qc_min > 0 else ''))
     for lang in jobs:  # 已全部在仓库中的语言：检查一下超长句后即可渲染
         if left[lang] == 0:
             left[lang] = 1
-            finish_task(lang, 'synth')
+            finish_task(lang)
 
     def worker():
         while True:
@@ -380,24 +497,34 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 continue
             try:
                 if kind == 'synth':
-                    data = post(lang, [{'text': t} for t in chunk])
-                    got = 0
-                    for t, audio in zip(chunk, data.get('audios', [])):
-                        raw = base64.b64decode(audio)
-                        if _valid_audio(raw):  # rỗng thì không lưu: lúc render sẽ tự đọc lại câu đó
-                            _store_file(store, lang, rid_for(lang), t).write_bytes(raw)
-                            got += 1
+                    got = [x for x in outputs(lang, chunk, post(lang, [{'text': t} for t in chunk])) if x[1]]
+                    for t, raw, qc in got:
+                        _save(file_of(lang, t), raw, qc)
                     with lock:
-                        result[lang][0] += got
-                        result[lang][1] += len(chunk) - got
+                        result[lang][0] += len(got)
+                        result[lang][1] += len(chunk) - len(got)
+                        scored[lang].update({t: qc[1] for t, _, qc in got if qc})
+                elif kind == 'redo':
+                    better = 0
+                    for t, raw, qc in outputs(lang, chunk, post(lang, [{'text': t} for t in chunk])):
+                        # Model có ngẫu nhiên nên đọc lại thường ra bản khác; chỉ thay khi nghe khớp hơn
+                        if raw and qc and qc[1] > scored[lang].get(t, 0):
+                            _save(file_of(lang, t), raw, qc)
+                            with lock:
+                                if scored[lang].get(t, 0) < qc_min <= qc[1]:
+                                    better += 1
+                                scored[lang][t] = qc[1]
+                    with lock:
+                        result[lang][3] += better
                 else:
                     data = post(lang, [{'text': t, 'duration': d} for t, d, _ in chunk])
                     better = 0
-                    for (t, _, old), audio in zip(chunk, data.get('audios', [])):
-                        raw = base64.b64decode(audio)
-                        # 只有确实变短了才替换，模型偶尔会读坏或不按时长
-                        if _valid_audio(raw) and _spoken_seconds(raw) < old:
-                            _store_file(store, lang, rid_for(lang), t).write_bytes(raw)
+                    for (t, _, old), (_, raw, qc) in zip(chunk, outputs(lang, [c[0] for c in chunk], data)):
+                        # 只有确实变短了才替换，模型偶尔会读坏或不按时长；đọc nhanh mà nghe ra lệch hơn thì bỏ
+                        prev = _read_qc(file_of(lang, t))
+                        ok_qc = not qc or not prev or qc[1] >= min(qc_min, prev[1])
+                        if raw and _spoken_seconds(raw) < old and ok_qc:
+                            _save(file_of(lang, t), raw, qc)
                             better += 1
                     with lock:
                         result[lang][2] += better
@@ -408,7 +535,7 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 log(f'  [{lang}] tạo sẵn giọng: 1 lượt lỗi ({e}) — lúc render sẽ tự đọc bù')
             finally:
                 with lock:
-                    finish_task(lang, kind)
+                    finish_task(lang)
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, parallel))]
     for t in threads:

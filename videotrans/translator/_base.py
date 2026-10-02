@@ -29,6 +29,29 @@ def dub_timing_rule(lang_name: str) -> str:
             f"warning/disclaimer content; a slightly long line is acceptable, a lost fact is not.\n")
 
 
+def dub_glossary_rule() -> str:
+    """dub_all 设置 PYVIDEOTRANS_GLOSSARY（thuat_ngu.py 生成的该语言术语表 JSON）时，附加到 {lang_prompt} 的术语规则：
+    同一术语从第一句到最后一句译法一致，品牌/币种代码等保持原样不被漏掉。"""
+    import json
+    path = os.environ.get('PYVIDEOTRANS_GLOSSARY', '').strip()
+    if not path:
+        return ''
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return ''
+    keep = [str(t) for t in data.get('keep') or [] if str(t).strip()]
+    trans = {str(k): str(v) for k, v in (data.get('translate') or {}).items() if str(k).strip() and str(v).strip()}
+    if not keep and not trans:
+        return ''
+    rule = "\n- **Glossary (this video)**: render these the same way in every block where they appear."
+    if keep:
+        rule += f" Keep exactly as written, never drop or translate: {', '.join(keep)}."
+    if trans:
+        rule += " Translate as: " + '; '.join(f'"{k}" -> "{v}"' for k, v in trans.items()) + '.'
+    return rule + '\n'
+
+
 @dataclass
 class BaseTrans(BaseCon):
     # 翻译渠道
@@ -252,4 +275,8 @@ class BaseTrans(BaseCon):
     def _get_key(self, it) -> str:
         it=serial(it)
         key_str = f'{self.translate_type}-{self.api_url}-{self.aisendsrt}-{self.model_name}-{self.source_code}-{self.target_code}-{it}'
+        # 术语表/时长预算会改变译文：有设置时纳入缓存键，避免改了术语表仍取到旧译文
+        extra = dub_glossary_rule() + os.environ.get('PYVIDEOTRANS_DUB_CPS', '')
+        if extra:
+            key_str += '-' + extra
         return get_md5(key_str)

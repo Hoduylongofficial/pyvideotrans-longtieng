@@ -399,7 +399,10 @@ EN_WORDS = {'the', 'and', 'of', 'you', 'that', 'this', 'with', 'your', 'what', '
             'it', 'but', 'they', 'will', 'there', 'from', 'about', 'which', 'would', 'their'}
 LLM_JUNK = re.compile(r'</?(TRANSLATE_TEXT|INPUT|think)>|```|^\s*(here is|here\'s|translation\s*:)', re.I)
 QA_LABELS = {'empty': 'rỗng', 'junk': 'lẫn chữ thừa của AI', 'untranslated': 'chưa dịch (giống tiếng Anh)',
-             'script': 'sai hệ chữ', 'english': 'còn tiếng Anh', 'long': 'dài quá khung thời gian'}
+             'script': 'sai hệ chữ', 'english': 'còn tiếng Anh', 'long': 'dài quá khung thời gian',
+             'term': 'mất thuật ngữ phải giữ nguyên'}
+# Loại lỗi chỉ để tham khảo (ghi vào báo cáo), không tính là bản dịch hỏng
+QA_INFO = ('long', 'term')
 
 
 def speech_cps(cfg: dict, code: str) -> float:
@@ -407,8 +410,10 @@ def speech_cps(cfg: dict, code: str) -> float:
     return float(table.get(code) or table.get(code.split('-')[0]) or table['default'])
 
 
-def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str) -> tuple:
-    """Soát bản dịch: ([(số câu, loại lỗi, nội dung)], nặng?). Loại 'long' chỉ để tham khảo.
+def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str, keep: list = ()) -> tuple:
+    """Soát bản dịch: ([(số câu, loại lỗi, nội dung)], nặng?). Loại trong QA_INFO chỉ để tham khảo.
+
+    keep: thuật ngữ phải giữ nguyên (thuat_ngu.py): câu gốc có mà câu dịch mất -> 'term'.
 
     Bản dịch luôn giữ đúng số câu + thời gian của bản gốc (check_target_sub); AI trả thiếu câu
     thì câu đó thành rỗng -> "rỗng" là dấu hiệu chính của dịch hỏng.
@@ -443,11 +448,16 @@ def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str) 
             kind = 'english'
         else:
             seconds = (t['end_time'] - t['start_time']) / 1000
-            if seconds > 0 and len(text) > seconds * cps * 1.6 + 10:
+            lost = [k for k in keep if re.search(rf'(?<!\w){re.escape(k)}(?!\w)', s)
+                    and k.casefold() not in text.casefold()]
+            if lost:
+                kind = 'term'
+                text = f'[{", ".join(lost)}] {text}'
+            elif seconds > 0 and len(text) > seconds * cps * 1.6 + 10:
                 kind = 'long'
         if kind:
             issues.append((t['line'], kind, text[:120]))
-    bad = [x for x in issues if x[1] != 'long']
+    bad = [x for x in issues if x[1] not in QA_INFO]
     empty = sum(1 for x in bad if x[1] == 'empty')
     severe = len(tgt) != len(src) or empty >= 3 or len(bad) >= max(3, 0.15 * max(1, len(src)))
     return issues, severe
@@ -489,8 +499,25 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
     from videotrans.util.help_srt import get_subtitle_from_srt
     total_cues = len(get_subtitle_from_srt(str(source_sub)))
 
+    # Bảng thuật ngữ: AI đọc cả phụ đề 1 lần, rút tên riêng / mã coin (giữ nguyên) + thuật ngữ (dịch thống
+    # nhất); mỗi ngôn ngữ dịch bảng đó rồi chèn vào prompt dịch. Lỗi thì dịch như cũ, không có bảng.
+    import thuat_ngu
+    glossary_dir = subs_dir / '_thuat_ngu'
+    terms = []
+    pending = [l for l in targets if not ((subs_dir / f'{l["code"]}.srt').exists()
+                                          and (subs_dir / f'{l["code"]}.srt').stat().st_size > 0)]
+    if pending and thuat_ngu.available(cfg):
+        try:
+            terms = thuat_ngu.extract_terms(cfg, source_sub, glossary_dir)
+            kept = sum(1 for t in terms if t['keep'])
+            log(f'  Bảng thuật ngữ: {len(terms)} mục ({kept} giữ nguyên, {len(terms) - kept} dịch thống nhất) '
+                f'— sửa tay được: {glossary_dir / "terms.json"}')
+        except Exception as e:  # noqa: BLE001 - không có bảng thì vẫn dịch được
+            log(f'  [CẢNH BÁO] Không lập được bảng thuật ngữ ({e}), dịch không kèm bảng.')
+    keep = thuat_ngu.keep_terms(glossary_dir)
+
     def qa(dest: Path, code: str) -> tuple:
-        issues, severe = check_translation(cfg, source_sub, dest, code)
+        issues, severe = check_translation(cfg, source_sub, dest, code, keep)
         report = logs_dir / f'qa-{code}.txt'
         if issues:
             write_qa_report(report, code, issues)
@@ -527,7 +554,12 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         # Ngân sách độ dài câu theo thời gian (prompt dịch): câu dịch vừa khung thì giọng đọc
         # không phải tua nhanh / đọc lại
         env = {'PYVIDEOTRANS_DUB_CPS': f'{speech_cps(cfg, code):g}'} \
-            if cfg.get('translate_timing_budget', False) else None
+            if cfg.get('translate_timing_budget', False) else {}
+        if terms:
+            try:
+                env[thuat_ngu.GLOSSARY_ENV] = str(thuat_ngu.glossary_for(cfg, terms, code, glossary_dir))
+            except Exception as e:  # noqa: BLE001
+                log(f'{head} — [CẢNH BÁO] không dịch được bảng thuật ngữ ({e}), dịch không kèm bảng')
         best = None  # (điểm, file, lỗi, nặng?)
         tries = 2 if qa_on else 1
         for n in range(1, tries + 1):
@@ -547,8 +579,8 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
             if not qa_on:
                 best = (0, candidate, [], False)
                 break
-            issues, severe = check_translation(cfg, source_sub, candidate, code)
-            bad = [x for x in issues if x[1] != 'long']
+            issues, severe = check_translation(cfg, source_sub, candidate, code, keep)
+            bad = [x for x in issues if x[1] not in QA_INFO]
             score = (severe, len(bad))
             if best is None or score < best[0]:
                 best = (score, candidate, issues, severe)
@@ -906,8 +938,52 @@ def subtitle_windows(items: list, video_seconds: float) -> dict:
     return windows
 
 
+def write_tts_qc_report(path: Path, code: str, rows: list, median: float = None) -> None:
+    """logs/qc-<mã>.txt: câu mà Whisper nghe lại vẫn lệch sau các lần đọc lại -> người dùng nghe kiểm."""
+    from videotrans.tts._omnivoice_modal import QC_HEALTHY_MEDIAN
+    weak = median is not None and median < QC_HEALTHY_MEDIAN
+    if not rows:
+        path.unlink(missing_ok=True)
+        return
+    lines = [f'Nghe lại giọng đọc [{code}] — {time.strftime("%Y-%m-%d %H:%M:%S")}', '']
+    if weak:
+        lines += [f'Whisper nghe CẢ ngôn ngữ này ra lệch (điểm trung vị {median:.2f}, ngôn ngữ bình thường '
+                  f'0.92-1.00).', 'Thường do giọng mẫu tiếng Anh làm đọc lơ lớ, hoặc Whisper nghe kém ngôn ngữ '
+                  'này -> không tự đọc lại.', 'Nghe thử vài câu: nếu lơ lớ, thử "omnivoice_voice": "native" '
+                  'cho ngôn ngữ này trong dub_all.config.json.', 'Các câu điểm thấp nhất:', '']
+        rows = sorted(rows, key=lambda r: r[2])[:10]
+    else:
+        lines += ['Câu dưới đây Whisper nghe ra khác câu yêu cầu (đọc sót / lặp / sai từ) dù đã đọc lại. '
+                  'Điểm 0-1, càng thấp càng lệch.', 'Nghe kiểm trong video; sửa chữ trong phụ đề hoặc thêm '
+                  'cách đọc vào phat_am.json rồi chạy lại.', '']
+    for text, heard, score in sorted(rows, key=lambda r: r[2]):
+        lines += [f'  [{score:.2f}] cần đọc : {text}', f'         nghe được: {heard}', '']
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def omnivoice_ref_warning(cfg: dict) -> str:
+    """OmniVoice mà không có giọng mẫu cố định thì lặng lẽ chuyển sang nhái từng câu từ video: không tạo
+    giọng trước được (mỗi ngôn ngữ chờ GPU rồi mới render, 1 GPU khởi động lại mỗi ngôn ngữ), không đọc
+    lại câu dài cho vừa khung, không có Whisper nghe lại. Đo log máy nhân viên 10/2026: ~9.5 phút/ngôn
+    ngữ thay vì ~5. Trả về lời cảnh báo, hoặc '' nếu ổn."""
+    if int(cfg.get('tts_type', EDGE_TTS)) != OMNIVOICE_TTS:
+        return ''
+    from videotrans.tts._omnivoice_modal import fixed_ref, remote_configured
+    if not remote_configured():
+        return ''
+    try:
+        if fixed_ref():
+            return ''
+        why = 'Chưa có giọng mẫu cố định'
+    except FileNotFoundError as e:
+        why = f'Không thấy file giọng mẫu ({e})'
+    return (f'{why} -> OmniVoice sẽ nhái từng câu từ video gốc: chậm gần gấp đôi (không tạo giọng trước '
+            f'song song), không đọc lại câu dài cho vừa khung, không có Whisper nghe lại, giọng không phải '
+            f'giọng mẫu. Cài giọng mẫu: DOI_TTS.bat mục 3 (kéo thả file giọng mẫu vào).')
+
+
 def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
-                       store: Path, log: Log) -> TtsPrefetch:
+                       store: Path, log: Log, logs_dir: Path = None) -> TtsPrefetch:
     """OmniVoice + giọng mẫu cố định: tạo sẵn giọng mọi ngôn ngữ trên GPU Modal, chạy nền.
 
     Ngôn ngữ nào tạo xong giọng thì render ngay trên máy này, song song với GPU tạo giọng ngôn ngữ
@@ -944,7 +1020,11 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
             res = prefetch(store, jobs, parallel=parallel, log=log,
                            native=native & set(jobs), slots=slots,
                            fit_ratio=float(cfg.get('tts_fit_ratio', 1.2) or 0),
-                           on_ready=lambda code: job.ready[code].set())
+                           on_ready=lambda code: job.ready[code].set(),
+                           qc_min=float(cfg.get('tts_qc_min', 0.75) or 0),
+                           qc_retries=int(cfg.get('tts_qc_retries', 2)),
+                           on_qc=(lambda code, rows, med: write_tts_qc_report(logs_dir / f'qc-{code}.txt', code, rows, med))
+                           if logs_dir else None)
             done = sum(v[0] for v in res.values())
             refit = sum(v[2] for v in res.values())
             log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, '
@@ -1568,6 +1648,14 @@ def main() -> int:
         log('[0/2] Kiểm tra cấu hình...')
         validate(cfg, langs, video, srt, log)
         log('  OK')
+        # Ngôn ngữ đổi số -> chữ trước khi đọc (chỉ chữ gửi cho OmniVoice, phụ đề giữ nguyên). Đặt vào
+        # môi trường để cả tạo giọng trước (máy này) lẫn tiến trình lồng tiếng (cli.py) dùng chung.
+        from videotrans.tts._dub_text import SPELL_ENV
+        os.environ[SPELL_ENV] = ','.join(str(c) for c in (cfg.get('tts_spell_numbers') or []))
+        if args.only != 'translate':
+            warning = omnivoice_ref_warning(cfg)
+            if warning:
+                log(f'  [CẢNH BÁO] {warning}')
 
         if args.preview_styles:
             log('')
@@ -1605,7 +1693,8 @@ def main() -> int:
             tts = TtsPrefetch()
             if langs:
                 try:
-                    tts = start_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log)
+                    tts = start_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log,
+                                             logs_dir)
                 except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
                     log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
             if with_original:

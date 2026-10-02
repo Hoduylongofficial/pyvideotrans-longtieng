@@ -1,0 +1,6 @@
+{
+  "_huong_dan": "Cach doc rieng cho giong OmniVoice: tu nao doc sai thi them vao day, chi giong doc thay, phu de giu nguyen. \"*\" = moi ngon ngu; ma ngon ngu (\"de\", \"ja\"...) = rieng ngon ngu do (ghi de len \"*\"). Thay nguyen tu, phan biet hoa thuong, cum dai khop truoc. Cau nao doc sai xem trong logs/qc-<ma>.txt (Whisper nghe lai). Sua xong chay lai: cau co tu do se duoc doc lai.",
+  "_vi_du": {"*": {"MEXC": "M E X C"}, "de": {"AV-Comparatives": "A V Comparatives"}},
+  "*": {},
+  "de": {}
+}

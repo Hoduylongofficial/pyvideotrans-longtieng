@@ -13,6 +13,7 @@ omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text (params.json không l
 """
 import base64
 import io
+import os
 import re
 import secrets
 import shutil
@@ -134,12 +135,16 @@ def choose_ref() -> None:
                            capture_output=True, text=True, encoding='utf-8', errors='replace').stderr
     cuts = [float(x) for x in re.findall(r'silence_start: ([\d.]+)', probe) if 6 <= float(x) <= 15]
     length = (cuts[-1] + 0.2) if cuts else 15
+    # Ghi ra file tạm rồi mới thay: người dùng có thể kéo thả chính file giọng mẫu đang dùng
+    tmp = REF_DIR / (REF_FILE + '.tmp.wav')
     rc = subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', str(src), '-t', f'{length:.2f}',
-                         '-ac', '1', '-ar', '24000', str(dest)]).returncode
+                         '-ac', '1', '-ar', '24000', str(tmp)]).returncode
     print(f'   Lấy {length:.1f} giây đầu của file làm giọng mẫu.')
-    if rc != 0 or not dest.is_file():
+    if rc != 0 or not tmp.is_file():
+        tmp.unlink(missing_ok=True)
         print('   Không đọc được file âm thanh này.')
         return
+    tmp.replace(dest)
     print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
     text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
     save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
@@ -199,9 +204,12 @@ def trial() -> None:
 # ---------------------------------------------------------------------------
 def _modal(*args, capture=False):
     cmd = ['uvx', '--from', 'modal', 'modal', *args]
+    # Khi bắt output qua pipe, Python của modal CLI mặc định ghi bằng cp1252 và chết ở ký tự '✓'
+    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
     if capture:
-        return subprocess.run(cmd, cwd=str(ROOT_DIR), capture_output=True, text=True, encoding='utf-8', errors='replace')
-    return subprocess.run(cmd, cwd=str(ROOT_DIR))
+        return subprocess.run(cmd, cwd=str(ROOT_DIR), env=env, capture_output=True, text=True,
+                              encoding='utf-8', errors='replace')
+    return subprocess.run(cmd, cwd=str(ROOT_DIR), env=env)
 
 
 def admin_deploy() -> None:

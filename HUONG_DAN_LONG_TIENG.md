@@ -150,6 +150,17 @@ Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
    - Câu nào giọng đọc dài hơn khung thời gian phụ đề quá 1,2 lần (`tts_fit_ratio`) thì GPU
      đọc lại câu đó với thời lượng vừa khung — giọng nói nhanh tự nhiên thay vì bị tua nhanh
      méo tiếng. Chỉ đọc lại những câu đó (dòng `... câu đọc lại cho vừa khung`).
+   - **Whisper nghe lại từng câu** ngay trên GPU (`tts_qc_min`, mặc định 0.75): câu đọc sót, lặp,
+     sai từ, ra tiếng ậm ừ thì GPU đọc lại tối đa 2 lần (`tts_qc_retries`), giữ bản nghe khớp nhất
+     (dòng `... câu đọc lại vì nghe sai`). Câu vẫn lệch ghi vào `logs/qc-<mã>.txt` để nghe kiểm.
+     Đo 10/2026 (25 ngôn ngữ × 12 câu): câu tốt được 0.92–1.00, khoảng 3% câu dưới 0.75, đọc lại
+     cứu được khoảng 2/3 số đó. Tốn thêm rất ít GPU (Whisper nghe 1 câu nhanh hơn đọc nhiều lần).
+   - Nếu **cả ngôn ngữ** nghe ra lệch (dòng `Whisper nghe cả ngôn ngữ lệch (trung vị ...)`) thì đó
+     là giọng đọc lơ lớ chứ không phải lỗi từng câu → không đọc lại (đọc lại cũng thế). Đo thử
+     với giọng mẫu tiếng Anh: Thái 0.63, Hindi 0.77 — nghe thử, lơ lớ thì đổi ngôn ngữ đó sang
+     `"omnivoice_voice": "native"` (xem dưới).
+   - Từ nào đọc sai (tên thương hiệu, viết tắt): thêm cách đọc vào `phat_am.json` ở thư mục phần
+     mềm, vd `"*": {"MEXC": "M E X C"}`. Chỉ giọng đọc thấy, phụ đề giữ nguyên.
 2. **Render** trên máy mình, số video cùng lúc tự chọn theo sức máy (`dub_parallel: "auto"`):
    RAM < 12 GB hoặc CPU < 4 nhân → 1 video; mã hoá bằng card đồ hoạ → 2; CPU ≥ 6 nhân và
    RAM ≥ 16 GB → 2; còn lại 1. Màn hình ghi rõ dòng `Máy này: ... -> render N video cùng lúc`.
@@ -158,10 +169,11 @@ Cách `LONG_TIENG` chạy với OmniVoice + giọng mẫu cố định:
 
 **Giọng bản xứ cho vài ngôn ngữ:** giọng mẫu tiếng Anh kéo âm Anh sang một số ngôn ngữ (đo
 thực tế: Mã Lai chỉ khớp 32%, Philippines 52%). Các ngôn ngữ có `"omnivoice_voice": "native"`
-trong `dub_all.config.json` (hiện: `ar`, `ja`, `tr`, `zh-tw`, `id`, `da`, `fil`, `ms`) dùng giọng
+trong `dub_all.config.json` (hiện: `ar`, `ja`, `tr`, `zh-tw`, `id`, `da`, `fil`, `ms`, `th`) dùng giọng
 nam bản xứ của OmniVoice thay cho giọng mẫu — sau khi đổi: Mã Lai 93%, Philippines 91%; thử 30
 câu mỗi ngôn ngữ: ar 75→81%, ja 95→96%, tr 83→89%, id 79→85%, da 86→94%, zh-tw 71→79%, và
-Whisper nhận đúng ngôn ngữ 30/30 câu (giọng Daniel: id chỉ 8/30). Giọng bản xứ nằm sẵn ở
+Whisper nhận đúng ngôn ngữ 30/30 câu (giọng Daniel: id chỉ 8/30). Thái (thêm 10/2026, video USJ, 30 câu):
+Whisper nghe khớp trung vị 0.67 → 1.00, câu lệch 21 → 3. Giọng bản xứ nằm sẵn ở
 `f5-tts\omnivoice_native\` (đi kèm bản cập nhật) nên mọi máy cùng 1 giọng. Ngôn ngữ nào nghe
 lơ lớ thì thêm `"omnivoice_voice": "native"` vào dòng của ngôn ngữ đó.
 
@@ -280,6 +292,14 @@ tiếng Anh, sai hệ chữ (vd tiếng Nhật mà toàn chữ Latin), chữ th�
 1 lần; vẫn hỏng nặng thì **bỏ qua lồng tiếng ngôn ngữ đó** (khỏi tốn render + tiền GPU), file
 dịch hỏng để ở `subs/_loi/` — chạy lại `LONG_TIENG.bat` để dịch lại.
 
+**Bảng thuật ngữ** (`translate_glossary`, mặc định bật, chỉ với kênh dịch AI): trước khi dịch,
+AI đọc cả phụ đề 1 lần, rút ra tên thương hiệu / mã coin / tên tính năng (giữ nguyên, vd MEXC,
+USDT, MetaTrader 5) và thuật ngữ chuyên ngành (dịch thống nhất, vd stop loss → Stop-Loss / 損切り),
+rồi chèn vào prompt dịch mọi ngôn ngữ — cùng một từ dịch giống nhau từ câu đầu tới câu cuối, và
+không bị rơi mất mã coin. Bảng nằm ở `subs/_thuat_ngu/` (`terms.json` + mỗi ngôn ngữ 1 file), sửa
+tay được: sửa xong xoá `subs/<mã>.srt` rồi chạy lại để dịch lại ngôn ngữ đó. Bước soát bản dịch
+báo thêm câu bị mất thuật ngữ phải giữ nguyên (chỉ báo, không tự dịch lại).
+
 Tuỳ chọn `translate_timing_budget` (mặc định tắt) nhắc AI dịch câu ngắn cho vừa thời gian. Đo
 thử trên video MEXC (tiếng Đức, 98 câu): không nhắc thì chỉ 3 câu vượt khung — bằng khi nhắc —
 mà khi nhắc AI còn cắt mất ý (mất chữ "USDT", mất vế so sánh). Câu dài đã có bước GPU đọc lại
@@ -322,6 +342,9 @@ Mở `dub_all.config.json` bằng Notepad. **Sửa xong nhớ lưu, giữ nguyê
 | Ép cách mã hoá video | `video_encoder` (`auto` mặc định; `libx264` = CPU, `h264_nvenc` = card NVIDIA, `h264_qsv` = Intel, `h264_amf` = AMD). Xoá `videotrans/encoder_choice.json` để máy đo lại |
 | Không nhúng phụ đề vào hình | `"subtitle_type": 0` — nhanh hơn rất nhiều vì không phải mã hoá lại video |
 | Giữ lại thư mục trung gian | `"cleanup_out": false` |
+| Tắt bảng thuật ngữ khi dịch | `"translate_glossary": false` |
+| Whisper nghe lại khắt khe hơn / tắt | `tts_qc_min` (0.75 mặc định; 0.85 khắt khe hơn, tốn GPU đọc lại hơn; 0 = tắt) |
+| Sửa cách đọc 1 từ | `phat_am.json` (không phải file config) |
 
 Danh sách giọng đọc đầy đủ có trong file `videotrans/voicejson/edge_tts.json`.
 Tên giọng phải chép đúng y nguyên, ví dụ `de-DE-KatjaNeural`.

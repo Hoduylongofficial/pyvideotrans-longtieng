@@ -273,6 +273,7 @@ dependencies = [
     "huggingface-hub>=1.10.0",
     "pythonnet",
     "bitsandbytes>=0.49.2",
+    "num2words==0.5.14",
 ]
 
 [project.optional-dependencies]

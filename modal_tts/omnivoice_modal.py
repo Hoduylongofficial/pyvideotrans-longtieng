@@ -17,6 +17,9 @@ API: POST <url>/tts   header  Authorization: Bearer <key>
   Giọng mẫu gửi 1 lần trong "refs", nhiều câu dùng chung (clone từng câu thì mỗi câu 1 ref).
   refs.text rỗng -> server tự nhận dạng lời bằng Whisper (lần đầu chậm hơn).
   duration (giây, tuỳ chọn) -> ép câu đọc vừa khung thời gian phụ đề.
+  "asr": true (tuỳ chọn) -> Whisper nghe lại từng câu vừa đọc, trả thêm "heard": ["...", ...]
+  để máy khách so với câu yêu cầu (bắt câu đọc sót / lặp / sai thứ tiếng rồi đọc lại).
+POST <url>/asr  {"items": [{"audio": "<base64>", "language": "de"}]} -> {"texts": ["...", ...]}
 GET <url>/health -> {"ok": true}
 """
 import modal
@@ -27,6 +30,9 @@ GPU = 'L4'            # ~0.80 USD/giờ, chỉ tính lúc đang chạy
 BATCH = 16            # số câu đọc cùng lúc trên GPU
 # Mã pyvideotrans không trùng mã OmniVoice: ar -> tiếng Ả Rập chuẩn (bản dịch ra tiếng chuẩn)
 LANG_ALIASES = {'ar': 'arb'}
+# Mã pyvideotrans -> mã Whisper (còn lại lấy phần trước dấu '-': pt-br -> pt)
+WHISPER_LANG = {'fil': 'tl', 'zh-tw': 'zh', 'zh-cn': 'zh'}
+ASR_MODEL = 'openai/whisper-large-v3-turbo'
 
 app = modal.App(APP_NAME)
 
@@ -59,6 +65,8 @@ class OmniVoiceTTS:
         from omnivoice import OmniVoice
         self.model = OmniVoice.from_pretrained(MODEL_DIR, device_map='cuda:0', dtype=torch.float16)
         self.prompts = {}   # cache giọng mẫu: cùng 1 file mẫu thì chỉ mã hoá 1 lần
+        import threading
+        self.asr_lock = threading.Lock()
 
     def _prompt(self, ref_b64: str, ref_text: str):
         import base64, hashlib, io
@@ -85,8 +93,6 @@ class OmniVoiceTTS:
         return None
 
     def _synthesize(self, refs: dict, items: list, num_step: int) -> list:
-        import base64, io
-        import soundfile as sf
         out = []
         for i in range(0, len(items), BATCH):
             chunk = items[i:i + BATCH]
@@ -121,11 +127,40 @@ class OmniVoiceTTS:
                     if w.size >= self.model.sampling_rate * 0.2:
                         break
                 wavs[k] = w
-            for wav in wavs:
-                buf = io.BytesIO()
-                sf.write(buf, wav, self.model.sampling_rate, format='FLAC', subtype='PCM_16')
-                out.append(base64.b64encode(buf.getvalue()).decode())
+            out.extend(wavs)
         return out
+
+    def _encode(self, wav) -> str:
+        import base64, io
+        import soundfile as sf
+        buf = io.BytesIO()
+        sf.write(buf, wav, self.model.sampling_rate, format='FLAC', subtype='PCM_16')
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def _transcribe(self, audios: list, languages: list) -> list:
+        """Whisper nghe lại: audios = [(mảng float32, sr)], ép đúng ngôn ngữ để câu đọc sai thứ tiếng
+        ra chữ vô nghĩa (điểm thấp) chứ không được Whisper dịch hộ."""
+        import numpy as np
+        with self.asr_lock:
+            if self.model._asr_pipe is None:
+                self.model.load_asr_model(ASR_MODEL)
+        texts = [''] * len(audios)
+        groups = {}
+        for i, code in enumerate(languages):
+            code = (code or '').lower()
+            groups.setdefault(WHISPER_LANG.get(code, code.split('-')[0]) or None, []).append(i)
+        for lang, idx in groups.items():
+            # Whisper chỉ nghe 30 giây/lượt; câu phụ đề không dài vậy, cắt cho chắc
+            inputs = [{'array': np.asarray(audios[i][0], dtype=np.float32)[:audios[i][1] * 30],
+                       'sampling_rate': audios[i][1]} for i in idx]
+            kwargs = {'task': 'transcribe'}
+            if lang:
+                kwargs['language'] = lang
+            with self.asr_lock:
+                res = self.model._asr_pipe(inputs, batch_size=16, generate_kwargs=kwargs)
+            for i, r in zip(idx, res):
+                texts[i] = (r.get('text') or '').strip()
+        return texts
 
     @modal.asgi_app()
     def web(self):
@@ -147,7 +182,29 @@ class OmniVoiceTTS:
             if not items or len(items) > 64:
                 raise HTTPException(status_code=400, detail='items phải có 1-64 câu')
             started = time.time()
-            audios = self._synthesize(body.get('refs') or {}, items, int(body.get('num_step', 32)))
-            return {'audios': audios, 'seconds': round(time.time() - started, 2)}
+            wavs = self._synthesize(body.get('refs') or {}, items, int(body.get('num_step', 32)))
+            out = {'audios': [self._encode(w) for w in wavs]}
+            if body.get('asr'):
+                sr = self.model.sampling_rate
+                out['heard'] = self._transcribe([(w, sr) for w in wavs], [it.get('language') for it in items])
+            out['seconds'] = round(time.time() - started, 2)
+            return out
+
+        @api.post('/asr')
+        def asr(body: dict, authorization: str = Header(default='')):
+            import base64, io
+            import soundfile as sf
+            if not hmac.compare_digest(authorization.removeprefix('Bearer ').strip(), expected):
+                raise HTTPException(status_code=401, detail='sai key')
+            items = body.get('items') or []
+            if not items or len(items) > 64:
+                raise HTTPException(status_code=400, detail='items phải có 1-64 câu')
+            started = time.time()
+            audios = []
+            for it in items:
+                wav, sr = sf.read(io.BytesIO(base64.b64decode(it['audio'])), dtype='float32', always_2d=True)
+                audios.append((wav.mean(axis=1), sr))
+            texts = self._transcribe(audios, [it.get('language') for it in items])
+            return {'texts': texts, 'seconds': round(time.time() - started, 2)}
 
         return api
