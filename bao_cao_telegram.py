@@ -13,6 +13,7 @@ làm hỏng lượt lồng tiếng.
 """
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -99,9 +100,12 @@ def send(text: str, files: list = ()) -> None:
 # Gói log
 # ---------------------------------------------------------------------------
 def zip_logs(workdir: Path, tag: str) -> Path:
-    """dub_all.log + report.md + logs/* của 1 thư mục làm việc -> logs/_telegram/<tag>.zip."""
+    """dub_all.log + report.md + logs/* + bản dịch (subs/*.srt, bảng thuật ngữ, bản dịch hỏng) của 1 thư
+    mục làm việc -> logs/_telegram/<tag>.zip. Có bản dịch thì đọc được chất lượng dịch, không chỉ lỗi."""
+    subs = workdir / 'subs'
     files = [workdir / 'dub_all.log', workdir / 'report.md'] + \
-        sorted(p for p in (workdir / 'logs').glob('*') if p.is_file())
+        sorted(p for p in (workdir / 'logs').glob('*') if p.is_file()) + \
+        sorted(subs.glob('*.srt')) + sorted((subs / '_loi').glob('*.srt')) + [subs / '_thuat_ngu' / 'terms.json']
     files = [p for p in files if p.exists()]
     out_dir = workdir / 'logs' / '_telegram'
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +119,7 @@ def zip_logs(workdir: Path, tag: str) -> Path:
         # Log cli.py quá to (hiếm): chỉ giữ log tổng + báo cáo soát lỗi
         with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
             for p in files:
-                if p.suffix in ('.txt', '.md') or p.name == 'dub_all.log':
+                if p.suffix in ('.txt', '.md', '.srt', '.json') or p.name == 'dub_all.log':
                     zf.write(p, p.relative_to(workdir).as_posix())
     return out
 
@@ -167,25 +171,103 @@ def report_interrupted(cfg: dict, workdir: Path, lines: list, log=None) -> None:
     _safe(log, 'log lượt bị ngắt', go)
 
 
+def _clock(line: str):
+    m = re.match(r'(\d\d):(\d\d):(\d\d) ', line)
+    return int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3]) if m else None
+
+
+def _span(lines: list, start: str, end: str):
+    """Số giây từ dòng chứa start tới dòng chứa end (qua nửa đêm vẫn đúng)."""
+    a = next((_clock(l) for l in lines if start in l), None)
+    b = next((_clock(l) for l in lines if end in l), None)
+    return None if a is None or b is None else (b - a) % 86400
+
+
+def _fmt(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds >= 3600:
+        return f'{seconds // 3600}h{seconds % 3600 // 60:02d}m'
+    return f'{seconds // 60}m{seconds % 60:02d}s'
+
+
+def quality_summary(lines: list) -> str:
+    """Tóm tắt chất lượng 1 lượt từ dub_all.log: thời gian từng pha, ngôn ngữ phải dịch lại / có ghi chú
+    soát dịch, câu Whisper nghe lại vẫn lệch theo ngôn ngữ, ngôn ngữ đọc lơ lớ — để đánh giá, tối ưu."""
+    out = []
+    timing = []
+    t_trans = _span(lines, '[1/2] Dịch phụ đề', '[2/2] Lồng tiếng')
+    t_dub = _span(lines, '[2/2] Lồng tiếng', 'Hoàn tất sau')
+    per_lang = [int(m[1]) * 60 + int(m[2]) for l in lines if '[gốc]' not in l
+                for m in [re.search(r' — xong sau (\d+)m(\d+)s', l)] if m]
+    if t_trans is not None:
+        timing.append(f'Dịch {_fmt(t_trans)}')
+    if t_dub is not None:
+        timing.append(f'Lồng tiếng + render {_fmt(t_dub)}')
+    if per_lang:
+        timing.append(f'TB {_fmt(sum(per_lang) / len(per_lang))}/ngôn ngữ')
+    if timing:
+        out.append('⏱ ' + ' · '.join(timing))
+
+    # Dịch: ngôn ngữ phải dịch lại + ghi chú soát dịch ("xong (1 mất thuật ngữ ... — xem qa-xx.txt)")
+    redo = sorted({m[1] for l in lines for m in [re.search(r'\] (\S+) .* — dịch lại lần', l)] if m})
+    notes = [f'{m[1]}: {m[2]}' for l in lines
+             for m in [re.search(r'\] (\S+) .* — xong \((.*?)(?: — xem [^)]*)?\)$', l)] if m]
+    if redo or notes:
+        out.append('\n📝 Dịch:')
+        if redo:
+            out.append(f'• Phải dịch lại: {", ".join(redo)}')
+        out += [f'• {n}' for n in notes[:10]]
+
+    # Giọng: lấy dòng "tạo sẵn giọng xong" cuối cùng của mỗi ngôn ngữ
+    voice = {}
+    for l in lines:
+        m = re.search(r'\[(\S+)\] tạo sẵn giọng xong: (\d+)/(\d+) câu(.*)', l)
+        if m:
+            voice[m[1]] = m
+    if voice:
+        def count(m, what):
+            n = re.search(r'(\d+) câu ' + what, m[4])
+            return int(n[1]) if n else 0
+        off = sorted(((count(m, 'nghe lại vẫn lệch'), c, m[3]) for c, m in voice.items()), reverse=True)
+        bad = [f'{c} {n}/{total}' for n, c, total in off if n]
+        reread = sum(count(m, 'đọc lại vì nghe sai') for m in voice.values())
+        refit = sum(count(m, 'đọc lại cho vừa khung') for m in voice.values())
+        lines_total = sum(int(m[3]) for m in voice.values())
+        accent = [f'{c} ({a[1]})' for c, m in voice.items()
+                  for a in [re.search(r'trung vị ([0-9.]+)', m[4])] if a]
+        out.append('\n🎙 Giọng (Whisper nghe lại):')
+        if bad:
+            out.append(f'• Câu vẫn lệch: {" · ".join(bad[:10])}' + (' …' if len(bad) > 10 else ''))
+        out.append(f'• {lines_total} câu: {reread} đọc lại vì nghe sai, {refit} đọc lại cho vừa khung')
+        if accent:
+            out.append(f'• Lơ lớ cả ngôn ngữ: {", ".join(accent)}')
+    return '\n'.join(out)
+
+
 def report_done(cfg: dict, workdir: Path, video: Path, report: Path, summary: str, failed: list,
                 log=None) -> None:
+    """Lượt nào xong cũng gửi (trừ "errors" / "off"): tóm tắt chất lượng + zip log đầy đủ để đánh giá."""
     mode = _mode(cfg)
     if mode == 'off' or not configured():
         return
-    trouble = [l.split(' ', 1)[-1].strip() for l in last_run(workdir / 'dub_all.log')
-               if any(t in l for t in TROUBLE)]
+    lines = last_run(workdir / 'dub_all.log')
+    trouble = [l.split(' ', 1)[-1].strip() for l in lines if any(t in l for t in TROUBLE)]
     if mode == 'errors' and not failed and not trouble:
         return
     icon = '❌' if failed else ('⚠️' if trouble else '✅')
     text = f'{icon} LỒNG TIẾNG XONG — {video.name}\nMáy: {machine()}\n{summary}'
     if failed:
         text += f'\nNgôn ngữ lỗi: {", ".join(failed)}'
+    quality = quality_summary(lines)
+    if quality:
+        text += '\n' + quality
     if trouble:
-        text += '\n\nCần xem:\n' + '\n'.join(f'• {t}' for t in trouble[:15])
-        if len(trouble) > 15:
-            text += f'\n… và {len(trouble) - 15} dòng nữa (trong file zip)'
-    files = [zip_logs(workdir, 'loi')] if failed or trouble else [report]
-    _safe(log, 'báo cáo', lambda: send(text, files))
+        text += '\n\n⚠️ Cần xem:\n' + '\n'.join(f'• {t}' for t in trouble[:12])
+        if len(trouble) > 12:
+            text += f'\n… và {len(trouble) - 12} dòng nữa (trong file zip)'
+    text += ('\n\nFile zip: report.md, dub_all.log, logs/qa-*.txt (soát dịch), logs/qc-*.txt (câu giọng '
+             'lệch), subs/*.srt (bản dịch)')
+    _safe(log, 'báo cáo', lambda: send(text, [zip_logs(workdir, 'loi' if failed or trouble else 'xong')]))
 
 
 def report_crash(cfg: dict, workdir: Path, video: Path, error: str, log=None) -> None:
