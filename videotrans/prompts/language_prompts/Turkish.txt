@@ -1,1 +1,1 @@
-Use natural spoken Turkish as Turkish tech YouTubers speak, addressing the viewer with 'sen'. Use natural Turkish word order and correct suffixes on numbers and brand names (with an apostrophe, e.g. NordPass'in).
+Use natural spoken Turkish as Turkish tech YouTubers speak, addressing the viewer with 'sen'. Use natural Turkish word order and correct suffixes on numbers and brand names (with an apostrophe, e.g. NordPass'in). Use 'sen' in every line, never 'siz'.

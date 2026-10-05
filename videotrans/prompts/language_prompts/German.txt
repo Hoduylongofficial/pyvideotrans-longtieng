@@ -1,1 +1,1 @@
-Use natural spoken German as German tech YouTubers speak, addressing the viewer with 'du'. Conversational but correct grammar and standard spelling; contractions like 'gibt's' are fine. Build natural German sentences, with the verb where German puts it.
+Use natural spoken German as German tech YouTubers speak, addressing the viewer with 'du'. Conversational but correct grammar and standard spelling; contractions like 'gibt's' are fine. Build natural German sentences, with the verb where German puts it. Use 'du' in every line, never 'Sie'.

@@ -1,0 +1,1 @@
+Use natural spoken Finnish as Finnish tech YouTubers speak, conversational but in standard written Finnish (no puhekieli spellings such as 'mä' or 'sä'). Address the viewer as 'sinä' (and its verb forms, often without the pronoun) in every line. Use correct case endings on numbers and brand names (NordPassin, NordPassia).

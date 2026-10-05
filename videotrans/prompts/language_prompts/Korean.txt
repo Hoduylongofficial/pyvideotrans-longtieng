@@ -1,1 +1,1 @@
-Use natural spoken Korean as Korean tech YouTubers speak, in polite informal 해요체. Use natural Korean word order and omit subjects where Korean naturally does.
+Use natural spoken Korean as Korean tech YouTubers speak, in polite informal 해요체. Use natural Korean word order and omit subjects where Korean naturally does. Keep the same 해요체 level in every line.

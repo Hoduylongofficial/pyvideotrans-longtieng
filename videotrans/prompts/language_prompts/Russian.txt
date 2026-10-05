@@ -1,1 +1,1 @@
-Use natural spoken Russian as Russian tech YouTubers speak, addressing the viewer consistently (either 'ты' or 'вы'). Build natural Russian sentences; inflect numbers, prices and brand names correctly.
+Use natural spoken Russian as Russian tech YouTubers speak. Address the viewer with the polite 'вы' (and its verb forms: вам, ваш, нажмите) in every line; never 'ты'. Build natural Russian sentences; inflect numbers, prices and brand names correctly.

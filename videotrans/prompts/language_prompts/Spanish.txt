@@ -1,1 +1,1 @@
-Use natural neutral Spanish as popular Spanish-language tech YouTubers speak, addressing the viewer with 'tú'. Omit subject pronouns where Spanish naturally does.
+Use natural neutral Spanish as popular Spanish-language tech YouTubers speak, addressing the viewer with 'tú'. Omit subject pronouns where Spanish naturally does. Use 'tú' in every line, never 'usted' or 'vosotros'.

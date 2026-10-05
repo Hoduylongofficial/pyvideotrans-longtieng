@@ -1,1 +1,1 @@
-Use natural spoken Italian as Italian tech YouTubers speak, addressing the viewer with 'tu'. Omit subject pronouns where Italian naturally does.
+Use natural spoken Italian as Italian tech YouTubers speak, addressing the viewer with 'tu'. Omit subject pronouns where Italian naturally does. Use 'tu' in every line, never 'Lei' or 'voi'.

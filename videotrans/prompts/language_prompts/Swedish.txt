@@ -1,1 +1,1 @@
-Use natural spoken Swedish as Swedish tech YouTubers speak, conversational but with standard spelling (no 'nån'/'sånt'-style spellings in writing).
+Use natural spoken Swedish as Swedish tech YouTubers speak, conversational but with standard spelling (no 'nån'/'sånt'-style spellings in writing). Address the viewer as 'du' in every line.

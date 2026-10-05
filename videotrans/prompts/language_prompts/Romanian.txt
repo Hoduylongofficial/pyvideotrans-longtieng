@@ -1,1 +1,1 @@
-Use natural spoken Romanian as Romanian YouTubers speak, with correct diacritics (ă, â, î, ș, ț). Omit subject pronouns where Romanian naturally does.
+Use natural spoken Romanian as Romanian YouTubers speak, with correct diacritics (ă, â, î, ș, ț). Omit subject pronouns where Romanian naturally does. Address the viewer with the informal singular 'tu' (and its verb forms) in every line.

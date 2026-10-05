@@ -8,6 +8,7 @@ Translate ONLY the SRT subtitles inside the `<INPUT>` tags into {lang}. Every bl
 - Translate the meaning and the intent of each sentence, then say it the way a native {lang} YouTuber in this niche would say it to their audience. Rebuild the sentence in natural {lang} word order and idiom; never copy English structure word by word.
 - Replace English idioms, jokes and figures of speech with natural {lang} equivalents that carry the same point.
 - Register: friendly and conversational, like a popular, trustworthy reviewer. Not stiff or bookish, and not street slang either.
+- This batch is one part of a longer video that is translated in several parts. Address the viewer in exactly the form given in the language-specific guidance below, in every block, so all parts sound like the same speaker; never switch between formal and informal "you".
 - Write every word in full, spelled the standard way. No chat abbreviations or slang spellings (e.g. "yg", "gw", "u", "w/", "bc"), no emoji, no symbols used as words ("&", "+", "/", "->").
 
 ## 2. COMPLETE MEANING, NATURAL LENGTH

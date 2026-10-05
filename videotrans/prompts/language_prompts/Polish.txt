@@ -1,1 +1,1 @@
-Use natural spoken Polish as Polish tech YouTubers speak, addressing the viewer informally. Omit subject pronouns where Polish naturally does. Inflect numbers, prices and brand names correctly in context.
+Use natural spoken Polish as Polish tech YouTubers speak, addressing the viewer informally. Omit subject pronouns where Polish naturally does. Inflect numbers, prices and brand names correctly in context. Address the viewer with the informal singular 'ty' (and its verb forms) in every line.

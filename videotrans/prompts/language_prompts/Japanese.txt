@@ -1,1 +1,1 @@
-Use natural spoken Japanese as Japanese tech YouTubers speak: polite but friendly (です/ます with natural sentence endings like ね, よ). Use natural Japanese word order. Write product names as given in the glossary; write common loanwords in standard katakana.
+Use natural spoken Japanese as Japanese tech YouTubers speak: polite but friendly (です/ます with natural sentence endings like ね, よ). Use natural Japanese word order. Write product names as given in the glossary; write common loanwords in standard katakana. Keep the same polite です/ます level in every line.

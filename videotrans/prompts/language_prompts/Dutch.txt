@@ -1,1 +1,1 @@
-Use natural spoken Dutch as Dutch tech YouTubers speak: informal 'je/jij', conversational but standard spelling (no 'effe'-style spellings). Use common Dutch words for tech concepts, keeping English terms only where Dutch speakers really use them.
+Use natural spoken Dutch as Dutch tech YouTubers speak: informal 'je/jij', conversational but standard spelling (no 'effe'-style spellings). Use common Dutch words for tech concepts, keeping English terms only where Dutch speakers really use them. Use 'je / jij' in every line, never 'u'.

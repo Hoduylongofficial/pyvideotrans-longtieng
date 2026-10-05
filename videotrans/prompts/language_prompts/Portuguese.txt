@@ -1,1 +1,1 @@
-Use natural Brazilian Portuguese as Brazilian tech YouTubers speak, addressing the viewer as 'você'. Spoken forms like 'pra' are fine; no chat abbreviations such as 'vc' or 'tb'.
+Use natural Brazilian Portuguese as Brazilian tech YouTubers speak, addressing the viewer as 'você'. Spoken forms like 'pra' are fine; no chat abbreviations such as 'vc' or 'tb'. Use 'você' in every line, never 'tu' or 'o senhor'.
