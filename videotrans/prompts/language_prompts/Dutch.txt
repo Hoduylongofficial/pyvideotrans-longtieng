@@ -1,1 +1,1 @@
-Use natural spoken Dutch. Avoid overly complex compound words; break them down or simplify if it reduces speaking time. Use spoken contractions and particles (e.g., "effe", "zo'n") to make the TTS sound conversational.
+Use natural spoken Dutch as Dutch tech YouTubers speak: informal 'je/jij', conversational but standard spelling (no 'effe'-style spellings). Use common Dutch words for tech concepts, keeping English terms only where Dutch speakers really use them.

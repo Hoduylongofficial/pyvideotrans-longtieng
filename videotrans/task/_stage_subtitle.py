@@ -30,6 +30,13 @@ class SubtitleMixin:
             (settings.get('cjk_len', 15) if self.cfg.target_language_code[:2] in contants.CJK_LANG else
              settings.get('other_len', 60)))
         target_sub_list = get_subtitle_from_srt(self.cfg.target_sub)
+        # dub_all：配音按整句（合并被截断的句子），画面字幕用另行切分的短字幕（每条最多两行）。
+        # 仅单语字幕；配音只加速音频时字幕起点不变，切分后的时间轴仍然对得上
+        display = os.environ.get('PYVIDEOTRANS_DISPLAY_SRT', '').strip()
+        if display and Path(display).is_file() and self.cfg.subtitle_type in (1, 2) \
+                and not self.cfg.video_autorate:
+            target_sub_list = get_subtitle_from_srt(display)
+            logger.debug(f'画面字幕使用切分后的 {display}')
 
         srt_string = ""
         _join_flag = ''

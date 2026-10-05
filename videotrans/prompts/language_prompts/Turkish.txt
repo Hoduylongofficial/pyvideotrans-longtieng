@@ -1,1 +1,1 @@
-Turkish is highly agglutinative, leading to very long words that speed up TTS. Compress meanings ruthlessly. Omit unnecessary suffixes and pronouns if the core meaning survives. Do not artificially reverse split sentences just to put the verb at the end; translate fragments in-place.
+Use natural spoken Turkish as Turkish tech YouTubers speak, addressing the viewer with 'sen'. Use natural Turkish word order and correct suffixes on numbers and brand names (with an apostrophe, e.g. NordPass'in).

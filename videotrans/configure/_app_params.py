@@ -138,7 +138,7 @@ class AppParams:
             "ninerouter_api": "",
             "ninerouter_key": "",
             "ninerouter_model": str(_settings.get('ninerouter_model', '')).strip().split(',')[0],
-            "ninerouter_max_token": 8192,
+            "ninerouter_max_token": 32768,#最大输出32k（低于此值时 _ninerouter 也按 32768）
             "ninerouter_reasoning_effort": "No",
             "huoshan_max_token": 32768,#最大输出32k
             "zijiehuoshan_key": "",

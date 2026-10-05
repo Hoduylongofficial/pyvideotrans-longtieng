@@ -622,6 +622,82 @@ class RamGate:
             self.cond.notify_all()
 
 
+# Phụ đề hiển thị trên hình khi khác phụ đề dùng để đọc (gop_cau.py): subs/_hien_thi/<mã>.srt
+DISPLAY_DIR = '_hien_thi'
+
+
+def prepare_source_sub(cfg: dict, srt: Path, subs_dir: Path, log=None) -> Path:
+    """subs/<gốc>.srt: phụ đề gốc đã gộp các câu bị cắt đôi (gop_cau.regroup), để dịch + đọc cả câu.
+    Bản gốc chưa gộp giữ ở subs/_hien_thi/<gốc>.srt cho video gốc (thời gian từng mảnh chính xác hơn).
+    Đã có thì giữ nguyên: các bản dịch đã có khớp từng câu với nó."""
+    source_language = cfg.get('source_language', 'en')
+    subs_dir.mkdir(parents=True, exist_ok=True)
+    source_sub = subs_dir / f'{source_language}.srt'
+    if source_sub.exists():
+        return source_sub
+    if cfg.get('merge_fragments', True):
+        import gop_cau
+        from videotrans.util.help_srt import get_subtitle_from_srt
+        try:
+            items = get_subtitle_from_srt(str(srt))
+            merged, n = gop_cau.regroup(items)
+        except Exception as e:  # noqa: BLE001 - không gộp được thì dùng nguyên bản
+            n = 0
+            if log:
+                log(f'  [CẢNH BÁO] Không gộp được câu bị cắt đôi ({e}), dùng phụ đề gốc nguyên bản')
+        if n:
+            display = subs_dir / DISPLAY_DIR / source_sub.name
+            display.parent.mkdir(exist_ok=True)
+            shutil.copy2(srt, display)
+            tmp = source_sub.with_suffix('.tmp')
+            gop_cau.write_srt(tmp, merged)
+            tmp.replace(source_sub)
+            if log:
+                log(f'  Gộp {n} chỗ câu bị cắt đôi ({len(items)} -> {len(merged)} câu): AI dịch + giọng đọc '
+                    f'cả câu, phụ đề trên hình vẫn chia ngắn')
+            return source_sub
+    shutil.copy2(srt, source_sub)
+    return source_sub
+
+
+def display_sub(cfg: dict, sub: Path, code: str, dest: Path) -> Path | None:
+    """Phụ đề để nhúng lên hình: câu dài quá 2 dòng chia thành nhiều phụ đề ngắn (gop_cau.split_display).
+    Trả về dest nếu có chia, None nếu dùng nguyên sub."""
+    import gop_cau
+    from videotrans.util.help_srt import get_subtitle_from_srt
+    items, n = gop_cau.split_display(get_subtitle_from_srt(str(sub)), maxlen_for(cfg, code), code)
+    if not n:
+        dest.unlink(missing_ok=True)
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    gop_cau.write_srt(dest, items)
+    return dest
+
+
+# "Chữ để đọc" (chu_doc.py): subs/_chu_doc/<mã>.json, giọng OmniVoice đọc bản này thay cho câu phụ đề
+SPEAK_DIR = '_chu_doc'
+
+
+def speak_enabled(cfg: dict) -> bool:
+    from videotrans.translator._constants import AI_TRANS_CHANNELS
+    return (bool(cfg.get('tts_speak_text', True)) and int(cfg.get('tts_type', EDGE_TTS)) == OMNIVOICE_TTS
+            and int(cfg.get('translate_type', 0)) in AI_TRANS_CHANNELS)
+
+
+def build_speak_text(cfg: dict, code: str, target_sub: Path, subs_dir: Path, log: Log, head: str) -> str:
+    """AI viết lại câu có số / ký hiệu / chữ viết tắt thành đúng cách người bản xứ đọc. Trả về ghi chú
+    ngắn cho log, '' nếu không có gì. Lỗi thì giọng đọc thẳng câu phụ đề như cũ."""
+    if not speak_enabled(cfg):
+        return ''
+    try:
+        import chu_doc
+        need, done = chu_doc.build(cfg, code, target_sub, subs_dir / SPEAK_DIR)
+    except Exception as e:  # noqa: BLE001
+        log(f'{head} — [CẢNH BÁO] không tạo được chữ để đọc cho số / ký hiệu ({e}), giọng đọc thẳng phụ đề')
+        return ''
+    return f'{done}/{need} câu có số / ký hiệu đã viết lại để đọc' if need else ''
+
+
 def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
                     logs_dir: Path, on_done=None) -> dict:
     """on_done(mã, trạng thái): gọi ngay khi xong từng ngôn ngữ (kể cả 'đã có' / lỗi) để pha lồng tiếng
@@ -631,9 +707,7 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
     translate_type = int(cfg.get('translate_type', 0))
     subs_dir.mkdir(parents=True, exist_ok=True)
 
-    source_sub = subs_dir / f'{source_language}.srt'
-    if not source_sub.exists():
-        shutil.copy2(srt, source_sub)
+    source_sub = prepare_source_sub(cfg, srt, subs_dir, log)
     log(f'  [{source_language}] phụ đề gốc -> {source_sub.name}')
 
     targets = [l for l in langs if l['code'] != source_language]
@@ -684,7 +758,8 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
                     log(f'{head} — đã có, nhưng [CẢNH BÁO] bản dịch hỏng nặng ({qa_summary(issues)}); '
                         f'xoá {dest.name} rồi chạy lại để dịch lại. Chi tiết: {report}')
                     return code, 'skipped'
-            log(f'{head} — đã có, bỏ qua')
+            note = build_speak_text(cfg, code, dest, subs_dir, log, head)
+            log(f'{head} — đã có, bỏ qua' + (f' ({note})' if note else ''))
             return code, 'skipped'
 
         # translate_srt.py ghi ra {output-dir}/{tên file nguồn}.{mã ngôn ngữ}.srt
@@ -763,7 +838,10 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
             return code, 'failed'
         candidate.replace(dest)
         issues, _, report = qa(dest, code) if qa_on else ([], False, None)
-        log(f'{head} — xong' + (f' ({qa_summary(issues)} — xem {report.name})' if issues else ''))
+        # Trước khi báo xong (on_done đưa ngôn ngữ lên GPU tạo giọng): giọng phải đọc bản chữ để đọc
+        note = build_speak_text(cfg, code, dest, subs_dir, log, head)
+        notes = ([f'{qa_summary(issues)} — xem {report.name}'] if issues else []) + ([note] if note else [])
+        log(f'{head} — xong' + (f' ({"; ".join(notes)})' if notes else ''))
         return code, 'ok'
 
     # Dịch chỉ là chờ API, không tốn CPU/GPU, nên chạy song song nhiều ngôn ngữ
@@ -1345,6 +1423,14 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
                                             f':{cfg.get("loudnorm_lra", 11)}')
         if is_separate and cfg.get('uvr_model'):
             env['PYVIDEOTRANS_UVR_MODEL'] = str(cfg['uvr_model'])
+        # Giọng đọc theo câu (cả câu gộp), phụ đề trên hình chia ngắn tối đa 2 dòng
+        if code != source_language:
+            try:
+                shown = display_sub(cfg, target_sub, code, subs_dir / DISPLAY_DIR / target_sub.name)
+                if shown:
+                    env['PYVIDEOTRANS_DISPLAY_SRT'] = str(shown)
+            except Exception as e:  # noqa: BLE001 - lỗi thì nhúng nguyên phụ đề như cũ
+                log(f'{head} — [CẢNH BÁO] không chia được phụ đề hiển thị ({e})')
 
         voice_label = lang['voice'] if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS \
             else TTS_LABELS.get(int(cfg.get('tts_type')), 'TTS').split(' (')[0] + ' (GPU Modal)'
@@ -1453,12 +1539,16 @@ def phase_original(cfg: dict, video: Path, subs_dir: Path, workdir: Path, final_
     work = workdir / '_original'
     work.mkdir(parents=True, exist_ok=True)
 
-    # Ngắt dòng giống hệt pha lồng tiếng (_process_subtitles) để 26 video trông đồng bộ
+    # Phụ đề trên hình: bản gốc chưa gộp câu (prepare_source_sub) nếu có, không thì chia câu dài như
+    # các ngôn ngữ kia (display_sub). Ngắt dòng giống hệt pha lồng tiếng (_process_subtitles).
+    shown = subs_dir / DISPLAY_DIR / source_sub.name
+    if not shown.is_file():
+        shown = display_sub(cfg, source_sub, code, work / f'_hien_thi_{code}.srt') or source_sub
     maxlen = maxlen_for(cfg, code)
     wrapped = work / f'{code}.srt'
     wrapped.write_text(''.join(
         f'{it["line"]}\n{it["time"]}\n{simple_wrap(it["text"].strip(), maxlen, code).strip()}\n\n'
-        for it in get_subtitle_from_srt(str(source_sub))), encoding='utf-8')
+        for it in get_subtitle_from_srt(str(shown))), encoding='utf-8')
 
     style_file = style_dir / f'{code}.json'
     style_file.write_text(json.dumps(style_for(cfg, code), ensure_ascii=False, indent=2),
@@ -1670,11 +1760,21 @@ def longest_cue(srt_file: Path) -> str:
 def write_report(cfg: dict, langs: list, trans_results: dict, dub_results: dict,
                  workdir: Path, video: Path, elapsed: float) -> Path:
     label = {'ok': 'Thành công', 'skipped': 'Bỏ qua (đã có)', 'failed': 'LỖI', '-': '-'}
+    omnivoice = int(cfg.get('tts_type', EDGE_TTS)) == OMNIVOICE_TTS
+
+    def voice_of(lang):
+        # Edge-TTS: giọng theo từng ngôn ngữ ("voice"); OmniVoice: giọng mẫu cố định hoặc giọng bản xứ
+        if lang['voice'].startswith('(') or not omnivoice:
+            return lang['voice']
+        if str(lang.get('omnivoice_voice', '')).lower() == 'native':
+            return 'OmniVoice — giọng bản xứ'
+        return 'OmniVoice — giọng mẫu'
+
     rows = []
     for lang in langs:
         code = lang['code']
         rows.append(
-            f'| {lang.get("name", "")} | `{code}` | {lang["voice"]} | '
+            f'| {lang.get("name", "")} | `{code}` | {voice_of(lang)} | '
             f'{label.get(trans_results.get(code, "-"), "-")} | '
             f'{label.get(dub_results.get(code, "-"), "-")} | '
             f'`{final_stem(lang, video.stem)}.mp4` |'
@@ -1873,8 +1973,15 @@ def main() -> int:
         log('  OK')
         # Ngôn ngữ đổi số -> chữ trước khi đọc (chỉ chữ gửi cho OmniVoice, phụ đề giữ nguyên). Đặt vào
         # môi trường để cả tạo giọng trước (máy này) lẫn tiến trình lồng tiếng (cli.py) dùng chung.
-        from videotrans.tts._dub_text import SPELL_ENV
+        from videotrans.tts._dub_text import SPEAK_ENV, SPELL_ENV
         os.environ[SPELL_ENV] = ','.join(str(c) for c in (cfg.get('tts_spell_numbers') or []))
+        # "Chữ để đọc" do AI viết (build_speak_text): cả tạo giọng trước lẫn cli.py tra cùng thư mục
+        if speak_enabled(cfg):
+            os.environ[SPEAK_ENV] = str(subs_dir / SPEAK_DIR)
+        else:
+            os.environ.pop(SPEAK_ENV, None)
+        # Phụ đề gốc (gộp câu bị cắt đôi) tạo 1 lần ở đây, trước khi luồng dịch và video gốc chạy song song
+        prepare_source_sub(cfg, srt, subs_dir, log)
         if args.only != 'translate':
             warning = omnivoice_ref_warning(cfg)
             if warning:
@@ -1883,8 +1990,6 @@ def main() -> int:
         if args.preview_styles:
             log('')
             log('[Xem trước] Dựng ảnh mẫu phụ đề...')
-            if not (subs_dir / f'{source_language}.srt').exists():
-                shutil.copy2(srt, subs_dir / f'{source_language}.srt')
             preview_langs = ([original_lang(cfg)] if with_original else []) + langs
             make_previews(cfg, preview_langs, subs_dir, workdir / 'preview', style_dir, log)
             return 0
@@ -1951,8 +2056,6 @@ def main() -> int:
                 log('')
                 log('[2/2] Lồng tiếng + nhúng phụ đề + render (song song với dịch)...')
             if with_original:
-                if not (subs_dir / f'{source_language}.srt').exists():
-                    shutil.copy2(srt, subs_dir / f'{source_language}.srt')
                 try:
                     dub_results[source_language] = phase_original(
                         cfg, video, subs_dir, workdir, final_dir, style_dir, log, logs_dir)

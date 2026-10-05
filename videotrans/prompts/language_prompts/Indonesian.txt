@@ -1,1 +1,1 @@
-Use highly casual, spoken Indonesian (Bahasa Gaul). Use common colloquial abbreviations natively understood by TTS (e.g., "yg", "udah", "nggak", "kalo"). Drop unnecessary prefixes/suffixes from verbs to match natural spoken speed.
+Use natural, friendly spoken Indonesian as popular Indonesian tech YouTubers speak, addressing the viewer as 'kamu'. Casual words like 'nggak', 'udah', 'banget' are fine, but write every word in full with standard spelling: never 'yg', 'gw', 'lo', 'dgn', 'tdk' or other chat abbreviations.

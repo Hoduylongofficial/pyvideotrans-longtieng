@@ -17,7 +17,7 @@ from pathlib import Path
 import requests
 
 from videotrans.configure.config import logger, params, ROOT_DIR
-from videotrans.tts._dub_text import heard_too_long, similarity, speak_text
+from videotrans.tts._dub_text import heard_too_long, scorable, similarity, speak_text
 
 BATCH = 32          # 每次请求的句数（服务端 GPU 一次批量 16 句）
 SR = 24000
@@ -381,8 +381,9 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
             if not _valid_audio(raw):   # rỗng thì không lưu: lúc render sẽ tự đọc lại câu đó
                 out.append((t, None, None))
                 continue
-            # Chấm trên toàn bộ lời nghe được (lặp vòng thì điểm thấp), chỉ lưu đoạn đầu cho báo cáo
-            qc = (heard[n][:300], similarity(t, heard[n], lang)) if n < len(heard) else None
+            # Chấm trên toàn bộ lời nghe được (lặp vòng thì điểm thấp), chỉ lưu đoạn đầu cho báo cáo.
+            # Câu quá ngắn / Whisper tự bịa câu: không chấm (scorable)
+            qc = (heard[n][:300], similarity(t, heard[n], lang))                 if n < len(heard) and scorable(t, heard[n], lang) else None
             out.append((t, raw, qc))
         # Whisper hay tự lặp vòng / bịa câu ("Υπότιτλοι AUTHORWAVE...") trên âm thanh bình thường. Nghe ra
         # dài gấp đôi câu mà âm thanh không dài bất thường (tốc độ đọc >= 0.6 trung vị cả lượt) = Whisper

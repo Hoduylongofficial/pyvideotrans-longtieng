@@ -30,6 +30,8 @@
   "translate_glossary": true,
   "_translate_timing_budget_note": "Nhac AI dich giu cau vua thoi gian phu de (theo toc do noi, ghi de bang \"speech_cps\": {\"de\": 18}). Mac dinh TAT: do thu (video MEXC, tieng Duc) ban khong nhac chi 3/98 cau vuot khung, bang ban co nhac, ma ban co nhac con cat mat y (mat chu USDT, mat ve so sanh). Buoc GPU doc lai cho vua khung (tts_fit_ratio) da xu ly cau dai.",
   "translate_timing_budget": false,
+  "_merge_fragments_note": "Phu de goc hay cat doi 1 cau ra 2 dong phu de (vd \"$37.\" | \"53 for the first 27 months\") -> ca 25 ngon ngu doc sai gia, cau cut. true = truoc khi dich gop cac manh lien nhau thanh 1 cau: AI dich ca cau, giong doc lien 1 hoi; phu de tren hinh van chia ngan toi da 2 dong. Chi gop khi phu de co cham cau. Dat false de giu nguyen tung dong.",
+  "merge_fragments": true,
 
   "voice_rate": "+0%",
   "volume": "+0%",
@@ -49,6 +51,8 @@
   "tts_qc_retries": 2,
   "_tts_spell_numbers_note": "Ngon ngu doi so -> chu truoc khi OmniVoice doc (vd [\"de\", \"fi\"]), phu de giu nguyen. Mac dinh tat: do 10/2026 OmniVoice doc so dung o 15 ngon ngu, doi sang chu con co the sai ngu phap (cach, giong). Cach doc rieng cho ten thuong hieu / tu kho: sua phat_am.json.",
   "tts_spell_numbers": [],
+  "_tts_speak_text_note": "OmniVoice + kenh dich AI: dich xong moi ngon ngu, AI viet lai cac cau co so / tien / % / chu viet tat (vd $37.53, ISO 27001, GDPR) thanh dung cach nguoi ban xu doc to, bang chu, dung ngu phap. Chi giong doc dung ban nay, phu de giu nguyen chu so. File subs/_chu_doc/<ma>.json (sua tay duoc). Do 10/2026: khong co buoc nay OmniVoice doc sai gia tien o gan nhu moi ngon ngu. Dat false de tat.",
+  "tts_speak_text": true,
 
   "_video_encoder_note": "Bo ma hoa video. Phu de nhung cung nen moi video bat buoc ma hoa lai toan bo hinh, day la khau lau nhat. \"auto\" = lan dau tu chay thu vai giay tren may nay roi nho lai (videotrans/encoder_choice.json): libx264 (CPU) hoac card do hoa (h264_nvenc / h264_qsv / h264_amf). Card chi duoc chon khi nhanh hon ro ret (>= 1.3 lan) vi file to hon, kem net hon. Ghi ten cu the de ep, vd \"libx264\".",
   "video_encoder": "auto",

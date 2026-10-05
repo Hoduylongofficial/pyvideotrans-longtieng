@@ -1,1 +1,1 @@
-Use spoken German register (Umgangssprache). Use contractions (e.g., "hab", "gibt's", "mal"). German verbs often go to the end, but for fragmented subtitles, leave the verb hanging in its respective block or use a shorter alternative construction to strictly maintain the zero-shift rule.
+Use natural spoken German as German tech YouTubers speak, addressing the viewer with 'du'. Conversational but correct grammar and standard spelling; contractions like 'gibt's' are fine. Build natural German sentences, with the verb where German puts it.

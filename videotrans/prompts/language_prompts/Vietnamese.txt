@@ -1,1 +1,1 @@
-Vietnamese is tonal; overly dense text sounds robotic. Target fewer than 4 syllables per second. Use consistent, natural spoken pronouns (anh, em, tao, mày) based on context. Avoid Sino-Vietnamese words if a shorter, pure Vietnamese spoken equivalent exists.
+Use natural spoken Vietnamese as Vietnamese tech YouTubers speak, addressing the viewer as 'bạn'. Use everyday words rather than heavy Sino-Vietnamese terms when a common spoken word exists.

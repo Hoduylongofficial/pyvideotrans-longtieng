@@ -1,1 +1,1 @@
-Omit subject pronouns (io, tu) completely unless strictly needed. Use natural spoken phrasing and short conversational fillers. Prefer shorter synonyms, as Italian words can be long and cause TTS to speak too rapidly.
+Use natural spoken Italian as Italian tech YouTubers speak, addressing the viewer with 'tu'. Omit subject pronouns where Italian naturally does.

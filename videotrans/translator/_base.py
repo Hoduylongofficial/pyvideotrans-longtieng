@@ -275,8 +275,10 @@ class BaseTrans(BaseCon):
     def _get_key(self, it) -> str:
         it=serial(it)
         key_str = f'{self.translate_type}-{self.api_url}-{self.aisendsrt}-{self.model_name}-{self.source_code}-{self.target_code}-{it}'
-        # 术语表/时长预算会改变译文：有设置时纳入缓存键，避免改了术语表仍取到旧译文
+        # 术语表/时长预算/提示词会改变译文：纳入缓存键，避免改了提示词或术语表仍取到旧译文
         extra = dub_glossary_rule() + os.environ.get('PYVIDEOTRANS_DUB_CPS', '')
+        if getattr(self, 'prompt', ''):
+            extra += '-' + get_md5(self.prompt)
         if extra:
             key_str += '-' + extra
         return get_md5(key_str)

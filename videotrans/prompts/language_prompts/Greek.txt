@@ -1,1 +1,1 @@
-Use modern conversational Greek (Demotic). Omit personal pronouns (εγώ, εσύ) as verbs already indicate the subject. Find shorter synonyms for polysyllabic words to keep TTS audio well-paced.
+Use natural modern conversational Greek (Demotic), the way Greek YouTubers address viewers. Omit subject pronouns where Greek naturally does. Use the Greek words viewers actually use for tech concepts.

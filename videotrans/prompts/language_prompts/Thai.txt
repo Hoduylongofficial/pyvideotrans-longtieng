@@ -1,1 +1,1 @@
-Thai has no spaces between words. You MUST phrase the translation so the TTS engine correctly identifies word boundaries. Avoid excessively formal or royal vocabulary. Use spoken particles (ครับ/ค่ะ, นะ) but keep them minimal to save time. Keep phrasing extremely direct.
+Use natural spoken Thai as Thai tech YouTubers speak, friendly and polite, with particles (ครับ, นะ) used sparingly. Thai has no spaces between words, so put a space between phrases or clauses where Thai writers normally pause; this also helps the voice. Write English brand names as given in the glossary.

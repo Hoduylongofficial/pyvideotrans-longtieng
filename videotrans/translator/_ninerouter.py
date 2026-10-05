@@ -26,7 +26,10 @@ class NineRouter(OpenAICampat):
         self.api_url = normalize_ninerouter_url(params.get('ninerouter_api', ''))
         self.api_key = params.get('ninerouter_key', '')
         self.model_name = params.get('ninerouter_model', '')
-        self.max_tokens = int(float(params.get('ninerouter_max_token', 8192) or 8192))
+        # Tối thiểu 32768: bản dịch tự nhiên (không nén) + phần suy nghĩ của Gemini vượt 8192 với lô 50 câu
+        # tiếng Thái / Đức (đo 10/2026) -> 9Router cắt cụt mà không báo finish_reason=length, phần mềm tưởng
+        # AI bỏ sót 20-50 câu. Cả 4 model trên 9Router đều nhận 32768.
+        self.max_tokens = max(32768, int(float(params.get('ninerouter_max_token', 8192) or 8192)))
         _reason = params.get('ninerouter_reasoning_effort')
         self.reasoning_effort = None if not _reason or _reason == 'No' else _reason
         super().__post_init__()

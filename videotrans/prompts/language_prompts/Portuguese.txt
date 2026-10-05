@@ -1,1 +1,1 @@
-Use conversational Portuguese (specify Brazilian or European based on overall context, default to Brazilian colloquial). Drop subject pronouns where natural. Use spoken contractions (e.g., "tá", "pra", "pro") to ensure the TTS voice speaks at a normal pace.
+Use natural Brazilian Portuguese as Brazilian tech YouTubers speak, addressing the viewer as 'você'. Spoken forms like 'pra' are fine; no chat abbreviations such as 'vc' or 'tb'.

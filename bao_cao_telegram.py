@@ -211,12 +211,23 @@ def quality_summary(lines: list) -> str:
 
     # Dịch: ngôn ngữ phải dịch lại + ghi chú soát dịch ("xong (1 mất thuật ngữ ... — xem qa-xx.txt)")
     redo = sorted({m[1] for l in lines for m in [re.search(r'\] (\S+) .* — dịch lại lần', l)] if m})
-    notes = [f'{m[1]}: {m[2]}' for l in lines
-             for m in [re.search(r'\] (\S+) .* — xong \((.*?)(?: — xem [^)]*)?\)$', l)] if m]
+    # Ghi chú "N/M câu có số / ký hiệu đã viết lại để đọc" (chu_doc) tách riêng, không tính là lỗi dịch
+    speak_note = r'(\d+)/(\d+) câu có số / ký hiệu đã viết lại để đọc'
+    speak_re = r';? ?' + speak_note
+    notes = [f'{m[1]}: {re.sub(speak_re, "", m[2]).strip("; ")}' for l in lines
+             for m in [re.search(r'\] (\S+) .* — xong \((.*?)(?: — xem [^)]*)?\)$', l)]
+             if m and re.sub(speak_re, '', m[2]).strip('; ')]
     patched = [f'{m[1]} {m[3]}/{m[2]}' for l in lines
                for m in [re.search(r'\] (\S+) .* — AI bỏ sót (\d+) câu, đã dịch bù (\d+)', l)] if m]
-    if redo or notes or patched:
+    speak = {m[1]: (int(m[2]), int(m[3])) for l in lines
+             for m in [re.search(r'\] (\S+) .*?' + speak_note, l)] if m}
+    if redo or notes or patched or speak:
         out.append('\n📝 Dịch:')
+        if speak:
+            done, need = sum(v[0] for v in speak.values()), sum(v[1] for v in speak.values())
+            short = [f'{c} {d}/{n}' for c, (d, n) in speak.items() if d < n]
+            out.append(f'• Chữ để đọc (số, giá, ký hiệu): {done}/{need} câu ở {len(speak)} ngôn ngữ'
+                       + (f' — thiếu: {", ".join(short)}' if short else ''))
         if patched:
             out.append(f'• AI bỏ sót câu, đã dịch bù: {", ".join(patched)}')
         if redo:
