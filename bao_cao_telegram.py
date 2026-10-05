@@ -195,7 +195,8 @@ def quality_summary(lines: list) -> str:
     soát dịch, câu Whisper nghe lại vẫn lệch theo ngôn ngữ, ngôn ngữ đọc lơ lớ — để đánh giá, tối ưu."""
     out = []
     timing = []
-    t_trans = _span(lines, '[1/2] Dịch phụ đề', '[2/2] Lồng tiếng')
+    # Dịch chạy song song với lồng tiếng: hết pha dịch là dòng "Dịch xong N ngôn ngữ" (bản cũ: dòng [2/2])
+    t_trans = _span(lines, '[1/2] Dịch phụ đề', 'Dịch xong') or _span(lines, '[1/2] Dịch phụ đề', '[2/2] Lồng tiếng')
     t_dub = _span(lines, '[2/2] Lồng tiếng', 'Hoàn tất sau')
     per_lang = [int(m[1]) * 60 + int(m[2]) for l in lines if '[gốc]' not in l
                 for m in [re.search(r' — xong sau (\d+)m(\d+)s', l)] if m]

@@ -583,7 +583,10 @@ def qa_summary(issues: list) -> str:
 # Pha 1 — dịch phụ đề
 # ---------------------------------------------------------------------------
 def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
-                    logs_dir: Path) -> dict:
+                    logs_dir: Path, on_done=None) -> dict:
+    """on_done(mã, trạng thái): gọi ngay khi xong từng ngôn ngữ (kể cả 'đã có' / lỗi) để pha lồng tiếng
+    chạy song song bắt đầu tạo giọng + render ngôn ngữ đó, không chờ dịch đủ cả loạt."""
+    started = time.time()
     source_language = cfg.get('source_language', 'en')
     translate_type = int(cfg.get('translate_type', 0))
     subs_dir.mkdir(parents=True, exist_ok=True)
@@ -722,10 +725,15 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
     parallel = max(1, int(cfg.get('translate_parallel', 4)))
     results = {}
 
+    def finished(code, status):
+        results[code] = status
+        if on_done:
+            on_done(code, status)
+
     if parallel == 1 or total <= 1:
         for i, lang in enumerate(targets, start=1):
-            code, status = translate_one(i, lang, quiet=False)
-            results[code] = status
+            finished(*translate_one(i, lang, quiet=False))
+        log(f'  Dịch xong {total} ngôn ngữ sau {fmt_duration(time.time() - started)}')
         return results
 
     log(f'  Dịch song song {parallel} ngôn ngữ cùng lúc '
@@ -735,8 +743,8 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         futures = {pool.submit(translate_one, i, lang, True): lang['code']
                    for i, lang in enumerate(targets, start=1)}
         for fut in as_completed(futures):
-            code, status = fut.result()
-            results[code] = status
+            finished(*fut.result())
+    log(f'  Dịch xong {total} ngôn ngữ sau {fmt_duration(time.time() - started)}')
     return results
 
 
@@ -1009,6 +1017,9 @@ class TtsPrefetch:
     def __init__(self):
         self.ready = {}      # mã ngôn ngữ -> threading.Event
         self.thread = None
+        self.feed = None     # queue: ngôn ngữ vừa dịch xong -> đưa lên GPU (chạy song song với dịch)
+        self.offered = set()
+        self.make_job = None
 
     def wait(self, code: str, log: Log, head: str) -> None:
         event = self.ready.get(code)
@@ -1016,7 +1027,29 @@ class TtsPrefetch:
             log(f'{head} — chờ tạo giọng trên GPU Modal...')
             event.wait()
 
+    def offer(self, code: str, status: str) -> None:
+        """Pha dịch vừa xong 1 ngôn ngữ: đưa lên GPU; dịch lỗi thì cho render đi tiếp (sẽ báo thiếu phụ đề)."""
+        if not self.feed or code in self.offered or code not in self.ready:
+            return
+        self.offered.add(code)
+        job = self.make_job(code) if status != 'failed' else None
+        if job:
+            self.feed.put(job)
+        else:
+            self.ready[code].set()
+
+    def close(self) -> None:
+        """Hết ngôn ngữ để dịch: ngôn ngữ chưa được đưa lên (bị bỏ qua) thì thả cho render tự xử lý."""
+        if not self.feed:
+            return
+        for code, event in self.ready.items():
+            if code not in self.offered:
+                event.set()
+        self.feed.put(None)
+        self.feed = None
+
     def join(self) -> None:
+        self.close()
         if self.thread:
             self.thread.join()
 
@@ -1090,12 +1123,15 @@ def omnivoice_ref_warning(cfg: dict) -> str:
 
 
 def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, final_dir: Path,
-                       store: Path, log: Log, logs_dir: Path = None) -> TtsPrefetch:
+                       store: Path, log: Log, logs_dir: Path = None, stream: bool = False) -> TtsPrefetch:
     """OmniVoice + giọng mẫu cố định: tạo sẵn giọng mọi ngôn ngữ trên GPU Modal, chạy nền.
 
     Ngôn ngữ nào tạo xong giọng thì render ngay trên máy này, song song với GPU tạo giọng ngôn ngữ
     tiếp theo. Nhái từng câu từ video thì không tạo sẵn được (giọng mẫu cắt từ video trong lúc
     lồng tiếng) -> đọc trong lúc lồng tiếng như cũ.
+
+    stream=True: pha dịch đang chạy song song -> ngôn ngữ chưa có phụ đề sẽ được đưa lên GPU qua
+    job.offer() ngay khi dịch xong (job.close() khi dịch hết).
     """
     job = TtsPrefetch()
     if int(cfg.get('tts_type', EDGE_TTS)) != OMNIVOICE_TTS:
@@ -1105,27 +1141,41 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
     if not remote_configured() or not fixed_ref():
         return job
     video_seconds = _probe_video(video)[2]
-    jobs, slots = {}, {}
-    for lang in langs:
-        sub = subs_dir / f'{lang["code"]}.srt'
-        if find_final_video(final_dir, lang, video.stem) or not sub.exists():
-            continue
+
+    def make_job(code: str):
+        """(mã, câu cần đọc, khung thời gian) từ subs/<mã>.srt, hoặc None nếu chưa có phụ đề"""
+        sub = subs_dir / f'{code}.srt'
+        if not (sub.exists() and sub.stat().st_size > 0):
+            return None
         # Giống hệt cách _stage_dubbing lấy câu để đọc -> kho khớp đúng từng câu lúc render
         items = [it for it in get_subtitle_from_srt(str(sub))
                  if it['end_time'] >= it['start_time'] and it['text'].strip()]
-        jobs[lang['code']] = [it['text'] for it in items]
-        slots[lang['code']] = subtitle_windows(items, video_seconds)
-    if not jobs:
+        return code, [it['text'] for it in items], subtitle_windows(items, video_seconds)
+
+    todo = [l['code'] for l in langs if not find_final_video(final_dir, l, video.stem)]
+    jobs, slots = {}, {}
+    for code in todo:
+        made = make_job(code)
+        if made:
+            jobs[code], slots[code] = made[1], made[2]
+    if stream:
+        import queue
+        job.feed, job.make_job = queue.Queue(), make_job
+        job.offered = set(jobs)
+        job.ready = {code: threading.Event() for code in todo}
+    elif jobs:
+        job.ready = {code: threading.Event() for code in jobs}
+    else:
         return job
-    job.ready = {code: threading.Event() for code in jobs}
     parallel = prefetch_parallel(cfg)
     native ={l['code'] for l in langs if str(l.get('omnivoice_voice', '')).lower() == 'native'}
+    feed = job.feed
 
     def run():
         started = time.time()
         try:
-            res = prefetch(store, jobs, parallel=parallel, log=log,
-                           native=native & set(jobs), slots=slots,
+            res = prefetch(store, jobs, parallel=parallel, log=log, feed=feed, order=todo,
+                           native=native, slots=slots,
                            fit_ratio=float(cfg.get('tts_fit_ratio', 1.2) or 0),
                            on_ready=lambda code: job.ready[code].set(),
                            qc_min=float(cfg.get('tts_qc_min', 0.75) or 0),
@@ -1149,7 +1199,8 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
 
 def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path,
               final_dir: Path, style_dir: Path, log: Log, logs_dir: Path,
-              tts: TtsPrefetch = None) -> dict:
+              tts: TtsPrefetch = None, translated: dict = None) -> dict:
+    """translated = {mã: threading.Event}: pha dịch đang chạy song song, chờ đúng ngôn ngữ đó dịch xong."""
     source_language = cfg.get('source_language', 'en')
     source_sub = subs_dir / f'{source_language}.srt'
     sleep_between = float(cfg.get('sleep_between', 5))
@@ -1180,6 +1231,9 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
             return code, 'skipped'
 
         target_sub = subs_dir / f'{code}.srt'
+        if translated and code in translated and not translated[code].is_set():
+            log(f'{head} — chờ dịch xong...')
+            translated[code].wait()
         if code != source_language and not (target_sub.exists() and target_sub.stat().st_size > 0):
             log(f'{head} — LỖI: thiếu phụ đề {target_sub.name}, bỏ qua')
             return code, 'failed'
@@ -1799,27 +1853,57 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001 - lỗi thì ngôn ngữ đầu tiên tự tách như cũ
                 log(f'  [CẢNH BÁO] Không chạy trước được bước tách nhạc nền ({e})')
 
+        # Làm cả 2 pha: dịch chạy nền, ngôn ngữ nào dịch xong là tạo giọng + render ngay, không chờ dịch đủ
+        # cả loạt (log 10/2026: ngôn ngữ đầu dịch xong sau 4 phút nhưng render chờ tới phút 27)
+        overlap = args.only is None and bool(langs)
+        trans_thread, translated, tts = None, {}, TtsPrefetch()
+        trans_box = {}
         if args.only != 'dub':
             log('')
-            log('[1/2] Dịch phụ đề...')
-            trans_results = phase_translate(cfg, langs, srt, subs_dir, log, logs_dir)
+            log('[1/2] Dịch phụ đề...' + (' (lồng tiếng chạy song song: ngôn ngữ nào dịch xong là làm ngay)'
+                                          if overlap else ''))
+            if overlap:
+                translated = {l['code']: threading.Event() for l in langs}
+
+                def on_translated(code, status):
+                    tts.offer(code, status)
+                    translated[code].set()
+
+                def run_translate():
+                    try:
+                        trans_box['results'] = phase_translate(cfg, langs, srt, subs_dir, log, logs_dir,
+                                                               on_done=on_translated)
+                    except BaseException as e:  # noqa: BLE001 - báo lại ở luồng chính sau khi lồng tiếng xong
+                        trans_box['error'] = e
+                    finally:
+                        tts.close()
+                        for event in translated.values():
+                            event.set()
+
+                trans_thread = threading.Thread(target=run_translate, daemon=True)
+            else:
+                trans_results = phase_translate(cfg, langs, srt, subs_dir, log, logs_dir)
 
         if args.only != 'translate':
-            log('')
-            log('[2/2] Lồng tiếng + nhúng phụ đề + render...')
+            if not overlap:
+                log('')
+                log('[2/2] Lồng tiếng + nhúng phụ đề + render...')
             pending = ([original_lang(cfg)] if with_original else []) + langs
             if any(not find_final_video(final_dir, l, video.stem) for l in pending):
                 try:
                     cfg['_video_encoder'] = choose_video_encoder(cfg, video, workdir / '_bench', log)
                 except Exception as e:  # noqa: BLE001 - đo lỗi thì dùng libx264 theo config
                     log(f'  [CẢNH BÁO] Không đo được tốc độ mã hoá ({e}), dùng libx264')
-            tts = TtsPrefetch()
             if langs:
                 try:
                     tts = start_tts_prefetch(cfg, langs, video, subs_dir, final_dir, workdir / '_tts', log,
-                                             logs_dir)
+                                             logs_dir, stream=overlap)
                 except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
                     log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
+            if trans_thread:
+                trans_thread.start()
+                log('')
+                log('[2/2] Lồng tiếng + nhúng phụ đề + render (song song với dịch)...')
             if with_original:
                 if not (subs_dir / f'{source_language}.srt').exists():
                     shutil.copy2(srt, subs_dir / f'{source_language}.srt')
@@ -1834,7 +1918,12 @@ def main() -> int:
                 sep_thread.join()
             if langs:
                 dub_results.update(phase_dub(cfg, langs, video, subs_dir, out_dir, final_dir,
-                                             style_dir, log, logs_dir, tts=tts))
+                                             style_dir, log, logs_dir, tts=tts, translated=translated))
+                if trans_thread:
+                    trans_thread.join()
+                    if 'error' in trans_box:
+                        raise trans_box['error']
+                    trans_results = trans_box.get('results', {})
                 tts.join()
                 # Đủ video mọi ngôn ngữ thì kho giọng tạo sẵn hết tác dụng (~200 MB/video)
                 if cfg.get('cleanup_out', True) and all(find_final_video(final_dir, l, video.stem) for l in langs):

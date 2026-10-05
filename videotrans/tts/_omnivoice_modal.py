@@ -319,7 +319,7 @@ def _save(f: Path, raw: bytes, qc=None) -> None:
 
 def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set = frozenset(),
              slots: dict = None, fit_ratio: float = 0, on_ready=None,
-             qc_min: float = 0, qc_retries: int = 2, on_qc=None) -> dict:
+             qc_min: float = 0, qc_retries: int = 2, on_qc=None, feed=None, order: list = None) -> dict:
     """固定参考音色下，把 {语言: [文本,...]} 全部预先合成进仓库；native 中的语言用本地口音音色。
 
     parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器）。任务按语言顺序优先：前面的语言先合成完，
@@ -335,6 +335,10 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
       硬加速自然得多；只重读超长的句子，不重读整批。
     Câu phụ đề được đổi sang chữ thực sự đọc (speak_text) trước khi tra kho / gửi đi, giống hệt
     synthesize_remote. 返回 {语言: (完成, 失败, 重读, 听写后重读改善)}。
+
+    feed (queue.Queue): ngôn ngữ đến dần — dub_all đưa (mã, [câu], {câu: giây}) vào ngay khi dịch xong
+    ngôn ngữ đó, None = hết. Có feed thì GPU tạo giọng song song với bước dịch thay vì chờ dịch đủ cả
+    loạt. order = thứ tự ưu tiên (thứ tự render) của mọi ngôn ngữ, kể cả ngôn ngữ chưa tới.
     """
     import queue
     fixed = fixed_ref()
@@ -342,33 +346,23 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         return {}
     url, key = str(params['omnivoice_modal_url']).strip(), str(params['omnivoice_modal_key']).strip()
     store.mkdir(parents=True, exist_ok=True)
-    # Chữ thực sự đọc; khung thời gian theo câu phụ đề tương ứng (trùng thì lấy khung ngắn nhất)
-    spoken_jobs, spoken_slots = {}, {}
-    for lang, texts in jobs.items():
-        spoken_jobs[lang] = [speak_text(t, lang) for t in texts]
-        win = {}
-        for t, window in (slots or {}).get(lang, {}).items():
-            k = speak_text(t, lang)
-            win[k] = min(window, win.get(k, window))
-        spoken_slots[lang] = win
-    jobs, slots = spoken_jobs, spoken_slots
-    # 每种语言一个参考音色：默认固定参考音色，native 语言用本地口音参考音频
-    lang_ref = {lang: (native_ref(lang, jobs[lang], url, key) if lang in native else fixed) for lang in jobs}
-    encoded = {r: _encode_ref(r[0]) for r in set(lang_ref.values())}
-    rid_for = {lang: _ref_id(*r) for lang, r in lang_ref.items()}.get
-    order = {lang: i for i, lang in enumerate(jobs)}
-    result = {lang: [0, 0, 0, 0] for lang in jobs}
+    initial, initial_slots = list(jobs.items()), slots or {}
+    jobs, slots = {}, {}            # 语言 -> 实际朗读的句子 / {句子: 可用秒数}，add() 逐个语言填入
+    lang_ref, rid, encoded = {}, {}, {}
+    # 优先级按 dub_all 的语言顺序（渲染顺序），后加入的语言也照此排队
+    order = {lang: i for i, lang in enumerate(order or [lang for lang, _ in initial])}
+    result = {}
     lock = threading.Lock()
     tasks = queue.PriorityQueue()   # (优先级, 序号, 类型, 语言, 句子)：重读 > 按语言顺序的合成
     seq = iter(range(10 ** 9))
     left = {}                       # 语言 -> 未完成的任务数
-    phase = {lang: 'synth' for lang in jobs}
-    rounds = {lang: 0 for lang in jobs}
-    scored = {lang: {} for lang in jobs}   # câu đọc trong lần chạy này -> điểm (chỉ những câu này mới đọc lại)
+    phase, rounds = {}, {}
+    scored = {}                     # câu đọc trong lần chạy này -> điểm (chỉ những câu này mới đọc lại)
     done_langs = set()
+    fed_all = threading.Event()     # feed đã đưa hết ngôn ngữ (không có feed: ngay từ đầu)
 
     def file_of(lang, text):
-        return _store_file(store, lang, rid_for(lang), text)
+        return _store_file(store, lang, rid[lang], text)
 
     def post(lang, items):
         r = lang_ref[lang]
@@ -473,18 +467,61 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 return
         ready(lang)
 
-    for lang, texts in jobs.items():
-        need = list(dict.fromkeys(t for t in texts if t.strip() and not file_of(lang, t).is_file()))
-        result[lang][0] = len(set(texts)) - len(need)
-        enqueue(lang, 'synth', need, 1 + order[lang])
+    def add(lang, texts, win, start=True):
+        """Đưa 1 ngôn ngữ vào hàng đợi GPU. start=False: chưa cho render ngay dù đã đủ trong kho."""
+        # Chữ thực sự đọc; khung thời gian theo câu phụ đề tương ứng (trùng thì lấy khung ngắn nhất)
+        spoken = [speak_text(t, lang) for t in texts]
+        w = {}
+        for t, window in (win or {}).items():
+            k = speak_text(t, lang)
+            w[k] = min(window, w.get(k, window))
+        # 每种语言一个参考音色：默认固定参考音色，native 语言用本地口音参考音频（可能要上 Modal 生成，锁外做）
+        r = native_ref(lang, spoken, url, key) if lang in native else fixed
+        enc = None if r in encoded else _encode_ref(r[0])
+        with lock:
+            if enc is not None:
+                encoded[r] = enc
+            jobs[lang], slots[lang], lang_ref[lang], rid[lang] = spoken, w, r, _ref_id(*r)
+            order.setdefault(lang, len(order))
+            result[lang], phase[lang], rounds[lang], scored[lang] = [0, 0, 0, 0], 'synth', 0, {}
+            need = list(dict.fromkeys(t for t in spoken if t.strip() and not file_of(lang, t).is_file()))
+            result[lang][0] = len(set(spoken)) - len(need)
+            enqueue(lang, 'synth', need, 1 + order[lang])
+            if start and left[lang] == 0:  # 已全部在仓库中：检查一下超长句后即可渲染
+                left[lang] = 1
+                finish_task(lang)
+
+    for lang, texts in initial:
+        add(lang, texts, initial_slots.get(lang), start=False)
     total = sum(left.values())
-    if total:
-        log(f'  Tạo sẵn giọng: {total} lượt, {parallel} lượt chạy cùng lúc trên GPU Modal '
-            f'(ngôn ngữ nào xong là render ngay)' + (', Whisper nghe lại từng câu' if qc_min > 0 else ''))
-    for lang in jobs:  # 已全部在仓库中的语言：检查一下超长句后即可渲染
+    if total or feed is not None:
+        log(f'  Tạo sẵn giọng: {parallel} lượt chạy cùng lúc trên GPU Modal (ngôn ngữ nào xong là render ngay'
+            + ('; ngôn ngữ nào dịch xong là đưa lên GPU ngay' if feed is not None else f', {total} lượt') + ')'
+            + (', Whisper nghe lại từng câu' if qc_min > 0 else ''))
+    for lang in list(jobs):  # 已全部在仓库中的语言：检查一下超长句后即可渲染
         if left[lang] == 0:
             left[lang] = 1
             finish_task(lang)
+
+    def feeder():
+        """dub_all đưa (ngôn ngữ, câu, khung thời gian) vào feed ngay khi dịch xong; None = hết."""
+        while True:
+            item = feed.get()
+            if item is None:
+                break
+            lang = item[0]
+            try:
+                add(*item)
+            except Exception as e:  # noqa: BLE001 - lúc render sẽ tự gọi Modal cho câu thiếu
+                log(f'  [{lang}] tạo sẵn giọng lỗi ({e}) — lúc render sẽ tự đọc')
+                if on_ready:
+                    on_ready(lang)
+        fed_all.set()
+
+    if feed is None:
+        fed_all.set()
+    else:
+        threading.Thread(target=feeder, daemon=True).start()
 
     def worker():
         while True:
@@ -492,7 +529,7 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 _, _, kind, lang, chunk = tasks.get(timeout=0.5)
             except queue.Empty:
                 with lock:
-                    if all(v <= 0 for v in left.values()):
+                    if fed_all.is_set() and all(v <= 0 for v in left.values()):
                         return
                 continue
             try:
