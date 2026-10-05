@@ -212,8 +212,12 @@ def quality_summary(lines: list) -> str:
     redo = sorted({m[1] for l in lines for m in [re.search(r'\] (\S+) .* — dịch lại lần', l)] if m})
     notes = [f'{m[1]}: {m[2]}' for l in lines
              for m in [re.search(r'\] (\S+) .* — xong \((.*?)(?: — xem [^)]*)?\)$', l)] if m]
-    if redo or notes:
+    patched = [f'{m[1]} {m[3]}/{m[2]}' for l in lines
+               for m in [re.search(r'\] (\S+) .* — AI bỏ sót (\d+) câu, đã dịch bù (\d+)', l)] if m]
+    if redo or notes or patched:
         out.append('\n📝 Dịch:')
+        if patched:
+            out.append(f'• AI bỏ sót câu, đã dịch bù: {", ".join(patched)}')
         if redo:
             out.append(f'• Phải dịch lại: {", ".join(redo)}')
         out += [f'• {n}' for n in notes[:10]]

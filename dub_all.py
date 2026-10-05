@@ -518,6 +518,54 @@ def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str, 
     return issues, severe
 
 
+def _write_srt(path: Path, items: list) -> None:
+    path.write_text(''.join(f'{n}\n{it["time"]}\n{it["text"].strip()}\n\n' for n, it in enumerate(items, start=1)),
+                    encoding='utf-8')
+
+
+def fill_empty_cues(source_sub: Path, target_sub: Path, cli_args: list, task_log: Path, env: dict,
+                    log: Log, quiet: bool) -> tuple:
+    """Dịch bù riêng các câu rỗng trong bản dịch: (số câu rỗng, số câu đã bù).
+
+    AI dịch theo lô 50 câu (aisendsrt) hay trả SRT thiếu / gộp câu -> câu không khớp thời gian thành
+    rỗng. Log máy nhân viên 10/2026: sv/fi rỗng 13-44 câu, dịch lại cả bài (~4 phút) vẫn rỗng, có lần
+    bị bỏ cả ngôn ngữ. Lô nhỏ chỉ gồm các câu rỗng thì AI trả đủ, ~30 giây. Giữ nguyên câu đã dịch tốt."""
+    from videotrans.util.help_srt import get_subtitle_from_srt
+    src = get_subtitle_from_srt(str(source_sub))
+    tgt = get_subtitle_from_srt(str(target_sub))
+    if len(src) != len(tgt):
+        return 0, 0
+    total, filled = 0, 0
+    for _ in range(2):
+        holes = [i for i, t in enumerate(tgt) if not t['text'].strip() and src[i]['text'].strip()]
+        total = total or len(holes)
+        if not holes:
+            break
+        work = target_sub.parent / f'_bu_{target_sub.stem}'
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir()
+        mini = work / source_sub.name
+        _write_srt(mini, [src[i] for i in holes])
+        args = list(cli_args)
+        args[args.index('--name') + 1] = str(mini)
+        args[args.index('--output-dir') + 1] = str(work)
+        produced = work / f'{mini.stem}.{args[args.index("--target_language_code") + 1]}.srt'
+        try:
+            ok = run_cli(args, log, task_log, env=env, quiet=quiet, stall_timeout=600) == 0 and produced.exists()
+            got = get_subtitle_from_srt(str(produced)) if ok else []
+        except Exception:  # noqa: BLE001 - bù không được thì để QA xử lý như cũ
+            got = []
+        if len(got) == len(holes):
+            for i, it in zip(holes, got):
+                if it['text'].strip():
+                    tgt[i]['text'] = it['text']
+                    filled += 1
+        shutil.rmtree(work, ignore_errors=True)
+    if filled:
+        _write_srt(target_sub, tgt)
+    return total, filled
+
+
 def write_qa_report(path: Path, code: str, issues: list) -> None:
     lines = [f'Soát bản dịch [{code}] — {time.strftime("%Y-%m-%d %H:%M:%S")}', '']
     lines += [f'  câu {line:>4}  {QA_LABELS.get(kind, kind):<28} {text}' for line, kind, text in issues]
@@ -634,6 +682,10 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
             if not qa_on:
                 best = (0, candidate, [], False)
                 break
+            holes, filled = fill_empty_cues(source_sub, candidate, cli_args, logs_dir / f'translate-{code}.log',
+                                            env, log, quiet)
+            if holes:
+                log(f'{head} — AI bỏ sót {holes} câu, đã dịch bù {filled}')
             issues, severe = check_translation(cfg, source_sub, candidate, code, keep)
             bad = [x for x in issues if x[1] not in QA_INFO]
             score = (severe, len(bad))

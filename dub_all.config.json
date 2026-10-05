@@ -24,7 +24,7 @@
   "dub_stall_minutes": 30,
   "_telegram_notify_note": "Gui bao cao ve nhom Telegram (cai token + nhom bang CAI_TELEGRAM.bat): \"always\" = luot nao cung gui: tom tat thoi gian + chat luong dich / giong (Whisper nghe lai) kem file zip log + ban dich | \"errors\" = chi gui khi co loi / canh bao / bi ngat | \"off\" = tat.",
   "telegram_notify": "always",
-  "_translate_qa_note": "Soat ban dich truoc khi long tieng: cau rong, con tieng Anh, sai he chu, lan chu thua cua AI. Loi nhieu thi tu dich lai 1 lan; hong nang thi bo qua ngon ngu do (file o subs/_loi/, chi tiet o logs/qa-<ma>.txt).",
+  "_translate_qa_note": "Soat ban dich truoc khi long tieng: cau rong, con tieng Anh, sai he chu, lan chu thua cua AI. Cau rong (AI bo sot) thi dich bu rieng cac cau do; loi khac nhieu thi tu dich lai 1 lan; hong nang thi bo qua ngon ngu do (file o subs/_loi/, chi tiet o logs/qa-<ma>.txt).",
   "translate_qa": true,
   "_translate_glossary_note": "Bang thuat ngu: truoc khi dich, AI doc ca phu de 1 lan, rut ra ten thuong hieu / ma coin / ten tinh nang (giu nguyen) va thuat ngu chuyen nganh (dich thong nhat tu cau dau toi cau cuoi), roi chen vao prompt dich moi ngon ngu. File o subs/_thuat_ngu/ (sua tay duoc, xoa subs/<ma>.srt de dich lai). Soat ban dich bao them cau bi mat thuat ngu phai giu nguyen. Chi chay voi kenh dich AI. Dat false de tat.",
   "translate_glossary": true,
