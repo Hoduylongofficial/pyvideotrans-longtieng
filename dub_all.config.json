@@ -16,7 +16,7 @@
   "uvr_model": "UVR-MDX-NET-Inst_HQ_4",
   "_uvr_model_note": "UVR-MDX-NET-Inst_HQ_4 giu nhac sach hon nhung nang hon. Doi thanh spleeter neu may yeu hoac tai model that bai.",
 
-  "_translate_parallel_note": "So ngon ngu dich cung luc o pha 1. Dich chi la cho API nen chay song song nhanh gan nhu gap N lan. Ha xuong 2-3 neu nha cung cap bao loi 429 / gioi han tan suat, dat 1 de quay ve chay lan luot. Khong anh huong pha 2 (long tieng/render) vi pha do an CPU/GPU.",
+  "_translate_parallel_note": "So ngon ngu dich cung luc o pha 1. Dich chi la cho API nen chay song song nhanh gan nhu gap N lan. Ha xuong 2-3 neu nha cung cap bao loi 429 / gioi han tan suat, dat 1 de quay ve chay lan luot. Dich chay song song voi render: may tu xem RAM trong, thieu thi tam dich it ngon ngu hon (moi tien trinh dich ~500 MB, de danh 1.5 GB cho render) nen may 8 GB khong bi do, khong can tu ha so nay.",
   "translate_parallel": 4,
   "_translate_stall_minutes_note": "Dich 1 ngon ngu ma bao nhieu phut khong co phan hoi thi coi la treo: tu dung va thu lai (API dich qua tai hay bi treo). Dat 0 de tat.",
   "translate_stall_minutes": 20,

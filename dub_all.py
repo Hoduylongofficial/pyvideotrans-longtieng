@@ -582,6 +582,46 @@ def qa_summary(issues: list) -> str:
 # ---------------------------------------------------------------------------
 # Pha 1 — dịch phụ đề
 # ---------------------------------------------------------------------------
+class RamGate:
+    """Chỉ mở thêm tiến trình dịch khi máy còn đủ RAM trống.
+
+    Mỗi tiến trình dịch (cli.py) ~470 MB (đo 10/2026). Dịch chạy song song với render, máy nhân viên
+    8 GB mà 4 ngôn ngữ dịch + render + tách nhạc cùng lúc thì hết RAM, máy đơ. Không đoán theo cấu
+    hình máy mà xem RAM trống thực tế trước mỗi lần mở: thiếu thì chờ, luôn cho ít nhất 1 tiến trình
+    chạy để không kẹt. Máy mạnh vẫn dịch đủ translate_parallel ngôn ngữ cùng lúc."""
+    PROC_MB = 500       # 1 tiến trình dịch
+    RESERVE_MB = 1500   # để dành cho render / Windows
+
+    def __init__(self, log: Log):
+        self.log = log
+        self.running = 0
+        self.cond = threading.Condition()
+
+    @staticmethod
+    def free_mb() -> int:
+        try:
+            import psutil
+            return psutil.virtual_memory().available // 2 ** 20
+        except Exception:  # noqa: BLE001 - không đo được thì không chặn
+            return 10 ** 6
+
+    def acquire(self, head: str) -> None:
+        need = self.PROC_MB + self.RESERVE_MB
+        told = False
+        with self.cond:
+            while self.running > 0 and self.free_mb() < need:
+                if not told:
+                    self.log(f'{head} — chờ RAM trống để dịch (còn {self.free_mb()} MB, cần {need} MB)...')
+                    told = True
+                self.cond.wait(5)
+            self.running += 1
+
+    def release(self) -> None:
+        with self.cond:
+            self.running -= 1
+            self.cond.notify_all()
+
+
 def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
                     logs_dir: Path, on_done=None) -> dict:
     """on_done(mã, trạng thái): gọi ngay khi xong từng ngôn ngữ (kể cả 'đã có' / lỗi) để pha lồng tiếng
@@ -621,6 +661,7 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         except Exception as e:  # noqa: BLE001 - không có bảng thì vẫn dịch được
             log(f'  [CẢNH BÁO] Không lập được bảng thuật ngữ ({e}), dịch không kèm bảng.')
     keep = thuat_ngu.keep_terms(glossary_dir)
+    ram = RamGate(log)
 
     def qa(dest: Path, code: str) -> tuple:
         issues, severe = check_translation(cfg, source_sub, dest, code, keep)
@@ -666,39 +707,44 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
                 env[thuat_ngu.GLOSSARY_ENV] = str(thuat_ngu.glossary_for(cfg, terms, code, glossary_dir))
             except Exception as e:  # noqa: BLE001
                 log(f'{head} — [CẢNH BÁO] không dịch được bảng thuật ngữ ({e}), dịch không kèm bảng')
-        best = None  # (điểm, file, lỗi, nặng?)
-        tries = 2 if qa_on else 1
-        for n in range(1, tries + 1):
-            log(f'{head} — đang dịch...' if n == 1 else f'{head} — dịch lại lần {n}...')
-            produced.unlink(missing_ok=True)
-            try:
-                done = attempt(cfg, log, head, logs_dir / f'translate-{code}.log', cli_args,
-                               lambda: produced.exists() and produced.stat().st_size > 0,
-                               env=env, quiet=quiet, stall_timeout=stall_timeout)
-            except Exception as e:  # noqa: BLE001 - một ngôn ngữ hỏng không được làm sập cả loạt
-                log(f'{head} — LỖI: {e}')
-                done = False
-            if not done:
-                break
-            candidate = subs_dir / f'_{code}.lan{n}.srt'
-            produced.replace(candidate)
-            if not qa_on:
-                best = (0, candidate, [], False)
-                break
-            holes, filled = fill_empty_cues(source_sub, candidate, cli_args, logs_dir / f'translate-{code}.log',
-                                            env, log, quiet)
-            if holes:
-                log(f'{head} — AI bỏ sót {holes} câu, đã dịch bù {filled}')
-            issues, severe = check_translation(cfg, source_sub, candidate, code, keep)
-            bad = [x for x in issues if x[1] not in QA_INFO]
-            score = (severe, len(bad))
-            if best is None or score < best[0]:
-                best = (score, candidate, issues, severe)
-            # Lỗi lẻ tẻ 1-2 câu thì giữ (xem logs/qa-<mã>.txt); nhiều hơn thì dịch lại 1 lần
-            if not severe and len(bad) < max(2, 0.05 * total_cues):
-                break
-            if n < tries:
-                log(f'{head} — bản dịch có lỗi ({qa_summary(bad)}), dịch lại...')
+        # Mỗi ngôn ngữ giữ 1 chỗ trong RamGate suốt lúc dịch (cả dịch lại + dịch bù)
+        ram.acquire(head)
+        try:
+            best = None  # (điểm, file, lỗi, nặng?)
+            tries = 2 if qa_on else 1
+            for n in range(1, tries + 1):
+                log(f'{head} — đang dịch...' if n == 1 else f'{head} — dịch lại lần {n}...')
+                produced.unlink(missing_ok=True)
+                try:
+                    done = attempt(cfg, log, head, logs_dir / f'translate-{code}.log', cli_args,
+                                   lambda: produced.exists() and produced.stat().st_size > 0,
+                                   env=env, quiet=quiet, stall_timeout=stall_timeout)
+                except Exception as e:  # noqa: BLE001 - một ngôn ngữ hỏng không được làm sập cả loạt
+                    log(f'{head} — LỖI: {e}')
+                    done = False
+                if not done:
+                    break
+                candidate = subs_dir / f'_{code}.lan{n}.srt'
+                produced.replace(candidate)
+                if not qa_on:
+                    best = (0, candidate, [], False)
+                    break
+                holes, filled = fill_empty_cues(source_sub, candidate, cli_args,
+                                                logs_dir / f'translate-{code}.log', env, log, quiet)
+                if holes:
+                    log(f'{head} — AI bỏ sót {holes} câu, đã dịch bù {filled}')
+                issues, severe = check_translation(cfg, source_sub, candidate, code, keep)
+                bad = [x for x in issues if x[1] not in QA_INFO]
+                score = (severe, len(bad))
+                if best is None or score < best[0]:
+                    best = (score, candidate, issues, severe)
+                # Lỗi lẻ tẻ 1-2 câu thì giữ (xem logs/qa-<mã>.txt); nhiều hơn thì dịch lại 1 lần
+                if not severe and len(bad) < max(2, 0.05 * total_cues):
+                    break
+                if n < tries:
+                    log(f'{head} — bản dịch có lỗi ({qa_summary(bad)}), dịch lại...')
+        finally:
+            ram.release()
 
         if best is None:
             log(f'{head} — LỖI (chi tiết: {logs_dir / f"translate-{code}.log"})')
