@@ -41,11 +41,28 @@ def _force_utf8_console() -> None:
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:  # noqa: BLE001 - chỉ là cải thiện hiển thị
             pass
+        _disable_quick_edit()
     for stream in (sys.stdout, sys.stderr, sys.stdin):
         try:
             stream.reconfigure(encoding='utf-8', errors='replace')
         except (AttributeError, ValueError):
             pass
+
+
+def _disable_quick_edit() -> None:
+    """Tắt QuickEdit của cửa sổ cmd: lỡ bấm chuột vào cửa sổ là console vào chế độ bôi đen, mọi print()
+    đứng im tới khi bấm phím -> cả loạt dừng theo (luồng đang ghi log giữ khoá, cli.py nghẽn ống ra).
+    Log máy nhân viên 10/2026: dịch xong fi.srt mà dòng "xong" không bao giờ ra, render sv đứng 73 phút."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            # bỏ ENABLE_QUICK_EDIT_MODE (0x40); ENABLE_EXTENDED_FLAGS (0x80) bắt buộc để cờ đó có hiệu lực
+            kernel32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)
+    except Exception:  # noqa: BLE001 - stdin không phải console (chạy nền / chuyển hướng)
+        pass
 
 
 _force_utf8_console()
@@ -104,17 +121,54 @@ class Log:
         self.logfile.parent.mkdir(parents=True, exist_ok=True)
         self.fh = self.logfile.open('a', encoding='utf-8')
         self._lock = threading.Lock()
+        self.last = time.monotonic()
+        self._closed = threading.Event()
+        threading.Thread(target=self._heartbeat, daemon=True).start()
 
     def __call__(self, msg: str = "") -> None:
         stamp = time.strftime('%H:%M:%S')
-        # pha dịch chạy nhiều luồng cùng lúc, không khoá thì các dòng log chèn lẫn vào nhau
+        # pha dịch chạy nhiều luồng cùng lúc, không khoá thì các dòng log chèn lẫn vào nhau.
+        # Ghi file trước: màn hình có đứng (bôi đen cửa sổ) thì file log vẫn đúng tiến độ thật
         with self._lock:
-            print(msg, flush=True)
             self.fh.write(f'{stamp} {msg}\n')
             self.fh.flush()
+            print(msg, flush=True)
+            self.last = time.monotonic()
+
+    def touch(self) -> None:
+        """Màn hình vừa có dòng mới (output cli.py in thẳng, không qua log)."""
+        self.last = time.monotonic()
+
+    def _heartbeat(self) -> None:
+        """Màn hình im vài phút (render cuối ~4-5 phút không in gì, dịch lại 1 ngôn ngữ ~4 phút) thì
+        nhân viên tưởng treo và tắt cửa sổ: log máy nhân viên 10/2026 tắt giữa lúc đang render Hà Lan
+        bình thường. Chỉ in ra màn hình, không ghi file log."""
+        while not self._closed.wait(30):
+            idle = time.monotonic() - self.last
+            if idle >= HEARTBEAT_SECONDS:
+                with self._lock:
+                    print(f'    ... vẫn đang chạy ({int(idle // 60)} phút chưa có dòng mới) — '
+                          f'ĐỪNG tắt cửa sổ, đừng bấm chuột vào cửa sổ', flush=True)
+                    self.last = time.monotonic()
 
     def close(self) -> None:
+        self._closed.set()
         self.fh.close()
+
+
+HEARTBEAT_SECONDS = 120
+
+
+def keep_awake() -> None:
+    """Không cho Windows tự ngủ khi đang chạy (cả loạt ~1-2 giờ, máy văn phòng hay đặt ngủ sau 15-30 phút
+    không đụng chuột). Tự hết hiệu lực khi chương trình thoát. Gập nắp laptop thì vẫn ngủ."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def fmt_duration(seconds: float) -> str:
@@ -351,6 +405,7 @@ def run_cli(cli_args: list, log: Log, task_log: Path, env: dict | None = None,
             if not text or _SRT_INDEX.match(text):
                 continue
             print(f'    {text}', flush=True)
+            log.touch()
         proc.wait()
         if stalled.is_set():
             fh.write(f'\n[dub_all] {int(stall_timeout)}s không có output — đã dừng tiến trình vì treo\n')
@@ -372,7 +427,7 @@ def attempt(cfg: dict, log: Log, head: str, task_log: Path, cli_args: list,
         if rc == 0 and succeeded():
             return True
         if rc == STALLED_RC:
-            log(f'{head} — treo {int(stall_timeout // 60)} phút không phản hồi (API dịch không trả lời), đã dừng')
+            log(f'{head} — treo {int(stall_timeout // 60)} phút không phản hồi, đã dừng')
         if n < attempts:
             log(f'{head} — hỏng lần {n}/{attempts}, thử lại sau 10s...')
             time.sleep(10)
@@ -1054,6 +1109,7 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
         log('  Giữ nhạc nền + SFX: sẽ tách nhạc khỏi giọng nói ở ngôn ngữ đầu tiên')
         log('  (chỉ tách 1 lần cho cả loạt, có thể mất vài phút với video dài)')
     enc = video_encoder(cfg)
+    video_seconds = _probe_video(video)[2]
 
     def dub_one(i: int, lang: dict, quiet: bool) -> tuple:
         code = lang['code']
@@ -1142,8 +1198,18 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
             else TTS_LABELS.get(int(cfg.get('tts_type')), 'TTS').split(' (')[0] + ' (GPU Modal)'
         log(f'{head} — lồng tiếng {voice_label} ...')
         started = time.time()
+        # 1 ngôn ngữ bình thường ~5-6 phút; im lặng quá dub_stall_minutes là treo -> giết, chạy lại.
+        # ffmpeg render cuối không in gì: video dài thì cho im lặng tới bằng độ dài video (máy 4 nhân
+        # libx264 render ~0.3 lần thời lượng). Lần còn phải tự tách nhạc nền trong cli.py thì không canh
+        # (UVR trên CPU im lặng cả chục phút)
+        stall = float(cfg.get('dub_stall_minutes', 30)) * 60 or None
+        if stall:
+            stall = max(stall, video_seconds)
+        if is_separate and not (sep_dir / 'instrument.wav').exists():
+            stall = None
         done = attempt(cfg, log, head, logs_dir / f'dub-{code}.log', cli_args,
-                       lambda: find_output_video(lang_out, video.stem) is not None, env=env, quiet=quiet)
+                       lambda: find_output_video(lang_out, video.stem) is not None, env=env, quiet=quiet,
+                       stall_timeout=stall)
 
         if is_separate:
             harvest_separated_audio(sep_dir, lang_out)
@@ -1630,7 +1696,11 @@ def main() -> int:
     for d in (subs_dir, out_dir, final_dir, style_dir, logs_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    import bao_cao_telegram
+    # Lượt trước không có dòng kết thúc (đóng cửa sổ / tắt máy / treo phải tắt) -> gửi bù log lên Telegram
+    previous_run = bao_cao_telegram.last_run(workdir / 'dub_all.log')
     log = Log(workdir / 'dub_all.log')
+    keep_awake()
     started = time.time()
     try:
         log('')
@@ -1643,6 +1713,7 @@ def main() -> int:
         tts_type = int(cfg.get('tts_type', EDGE_TTS))
         log(f'  Giọng đọc  : {TTS_LABELS.get(tts_type, f"tts_type={tts_type}")}')
         log('=' * 70)
+        bao_cao_telegram.report_interrupted(cfg, workdir, previous_run, log)
 
         log('')
         log('[0/2] Kiểm tra cấu hình...')
@@ -1727,20 +1798,36 @@ def main() -> int:
         skipped = sum(1 for v in stats.values() if v == 'skipped')
         failed = [k for k, v in stats.items() if v == 'failed']
 
+        summary = f'{fmt_duration(elapsed)} — {ok} thành công, {skipped} bỏ qua, {len(failed)} lỗi'
         log('')
         log('=' * 70)
-        log(f'  Hoàn tất sau {fmt_duration(elapsed)} — '
-            f'{ok} thành công, {skipped} bỏ qua, {len(failed)} lỗi')
+        log(f'  Hoàn tất sau {summary}')
         if failed:
             log(f'  Ngôn ngữ lỗi: {", ".join(failed)} (chạy lại lệnh cũ để làm tiếp)')
         log(f'  Video thành phẩm : {final_dir}')
         log(f'  Báo cáo          : {report}')
         log('=' * 70)
+        bao_cao_telegram.report_done(cfg, workdir, video, report, summary, failed, log)
         return 1 if failed else 0
     except KeyboardInterrupt:
         log('')
         log('[DỪNG] Đã huỷ. Chạy lại đúng lệnh cũ để tiếp tục từ chỗ dừng.')
         return 130
+    except SystemExit as e:
+        if e.code not in (0, None):  # validate(): cấu hình chưa hợp lệ, lỗi đã ghi vào log
+            lines = bao_cao_telegram.last_run(workdir / 'dub_all.log')
+            stop = next((i for i, l in enumerate(lines) if '[DỪNG]' in l), len(lines))
+            bao_cao_telegram.report_crash(cfg, workdir, video, '\n'.join(
+                l.split(' ', 1)[-1] for l in lines[stop:]) or str(e.code), log)
+        raise
+    except Exception as e:
+        import traceback
+        log('')
+        log(f'[LỖI] Chương trình dừng vì lỗi: {e!r}')
+        for line in traceback.format_exc().rstrip().splitlines():
+            log(f'  {line}')
+        bao_cao_telegram.report_crash(cfg, workdir, video, f'{e!r}', log)
+        raise
     finally:
         log.close()
 
