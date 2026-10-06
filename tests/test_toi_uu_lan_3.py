@@ -241,3 +241,34 @@ def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
                             style, lambda *a: None, tmp_path / 'logs', tts=tts)
     assert order == ['de', 'ar', 'es']
     assert res == {'de': 'ok', 'ar': 'ok', 'es': 'ok'}
+
+
+def test_shorten_ai_call_does_not_block_gpu(tmp_path, monkeypatch):
+    """Chờ AI viết ngắn câu tiếng Ả Rập thì GPU vẫn đọc ngôn ngữ khác (container không rảnh -> không tắt
+    rồi khởi động lại, đỡ tiền)."""
+    ref = tmp_path / 'ref.wav'
+    sf.write(str(ref), np.zeros(om.SR, dtype=np.float32), om.SR)
+    monkeypatch.setattr(om, 'fixed_ref', lambda: (str(ref), 'ref'))
+    monkeypatch.setattr(om, '_encode_ref', lambda p: 'x')
+    monkeypatch.setattr(om, 'params', {'omnivoice_modal_url': 'http://x', 'omnivoice_modal_key': 'k'})
+    events = []
+
+    def post(url, key, body, attempts=3):
+        events.append(('post', body['items'][0]['language'], time.time()))
+        return {'audios': [_flac(it.get('duration') or len(it['text']) * 0.1) for it in body['items']]}
+
+    def shorten(lang, rows):
+        events.append(('ask', lang, time.time()))
+        time.sleep(1.5)
+        return {rows[0][0]: 'short'}
+
+    monkeypatch.setattr(om, '_post', post)
+    long_line = 'x' * 50
+    res = om.prefetch(tmp_path / 'store', {'ar': [long_line], 'de': ['hallo welt', 'guten tag']},
+                      slots={'ar': {long_line: 1.0}, 'de': {'hallo welt': 5.0, 'guten tag': 5.0}},
+                      fit_ratio=1.2, log=lambda *a: None, shorten=shorten, shorten_ratio=1.3, parallel=1,
+                      order=['ar', 'de'])
+    ask = next(t for k, lang, t in events if k == 'ask')
+    de_posts = [t for k, lang, t in events if k == 'post' and lang == 'de']
+    assert de_posts and de_posts[0] < ask + 1.0     # đọc tiếng Đức trong lúc chờ AI
+    assert res['ar'][4] == 1 and res['de'][0] == 2

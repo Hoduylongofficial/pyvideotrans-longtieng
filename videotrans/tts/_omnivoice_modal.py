@@ -486,21 +486,22 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 better += 1
         return better
 
-    def do_shorten(lang, rows) -> None:
-        """AI viết ngắn lại câu quá dài (dub_all sửa phụ đề + chữ để đọc), đọc câu mới, câu mới vẫn dài thì
-        đọc lại theo khung."""
+    def ask_shorten(lang, rows) -> None:
+        """Chạy ở luồng riêng: AI viết ngắn lại câu quá dài (dub_all sửa phụ đề + chữ để đọc). Không chiếm
+        luồng gửi GPU: lúc chờ AI (20-60s) GPU vẫn đọc ngôn ngữ khác, container không bị rảnh / tắt rồi khởi
+        động lại (tốn tiền). Xong thì đưa câu mới vào hàng đợi GPU."""
         try:
             changed = shorten(lang, rows) or {}
         except Exception as e:  # noqa: BLE001 - không viết ngắn được thì render như cũ (tua nhanh)
             log(f'  [{lang}] không viết ngắn được câu đọc quá nhanh ({e})')
-            return
-        new = []
-        for sub, old, window, _ in rows:
-            if sub in changed and changed[sub].strip():
-                new.append((old, speak_text(changed[sub], lang), window))
-        if not new:
-            return
+            changed = {}
+        new = [(old, speak_text(changed[sub], lang), window)
+               for sub, old, window, _ in rows if sub in changed and changed[sub].strip()]
         with lock:
+            if not new:
+                left[lang] = 0
+                ready(lang)
+                return
             swap = {old: ns for old, ns, _ in new}
             jobs[lang] = [swap.get(t, t) for t in jobs[lang]]
             for old, ns, window in new:
@@ -508,14 +509,18 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 slots[lang][ns] = min(window, slots[lang].get(ns, window))
                 sub_of[lang][ns] = changed[sub_of[lang].get(old, old)]
             result[lang][4] += len(new)
-        need = list(dict.fromkeys(ns for _, ns, _ in new if not file_of(lang, ns).is_file()))
+            enqueue(lang, 'shorten', [list(dict.fromkeys(ns for _, ns, _ in new))], 0)
+
+    def read_short(lang, texts) -> None:
+        """Đọc câu đã viết ngắn; câu mới vẫn dài hơn khung thì đọc lại theo khung luôn"""
+        need = [t for t in texts if not file_of(lang, t).is_file()]
         for i in range(0, len(need), BATCH):
             part = need[i:i + BATCH]
             got = [x for x in outputs(lang, part, post(lang, [{'text': t} for t in part])) if x[1]]
             for t, raw, qc in got:
                 _save(file_of(lang, t), raw, qc)
         if fit_ratio > 0:
-            items = fit_items(too_long(lang, fit_ratio, [ns for _, ns, _ in new]))
+            items = fit_items(too_long(lang, fit_ratio, texts))
             for i in range(0, len(items), BATCH):
                 fitted = fit_now(lang, items[i:i + BATCH])
                 with lock:
@@ -542,10 +547,11 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
             if fits:
                 enqueue(lang, 'fit', fits, 0)
                 return
-        if phase[lang] != 'shorten':
+        if phase[lang] in ('synth', 'redo', 'fit'):
             rows = plan_shorten(lang)
             if rows:
-                enqueue(lang, 'shorten', [rows], 0)
+                left[lang], phase[lang] = 1, 'ask'   # giữ luồng GPU chưa thoát trong lúc chờ AI
+                threading.Thread(target=ask_shorten, args=(lang, rows), daemon=True).start()
                 return
         ready(lang)
 
@@ -638,7 +644,7 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                     with lock:
                         result[lang][3] += better
                 elif kind == 'shorten':
-                    do_shorten(lang, chunk[0])
+                    read_short(lang, chunk[0])
                 else:
                     better = fit_now(lang, chunk)
                     with lock:

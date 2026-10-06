@@ -1457,7 +1457,9 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
                            on_ready=lambda code: job.ready[code].set(),
                            qc_min=float(cfg.get('tts_qc_min', 0.75) or 0),
                            qc_retries=int(cfg.get('tts_qc_retries', 2)),
-                           on_qc=(lambda code, rows, med: write_tts_qc_report(logs_dir / f'qc-{code}.txt', code, rows, med))
+                           # luồng riêng: trích mp3 bằng ffmpeg mất vài giây, không bắt các luồng GPU chờ
+                           on_qc=(lambda code, rows, med: threading.Thread(
+                               target=write_tts_qc_report, args=(logs_dir / f'qc-{code}.txt', code, rows, med)).start())
                            if logs_dir else None,
                            shorten=(lambda code, rows: shorten_lines(cfg, code, rows, subs_dir, logs_dir, log))
                            if logs_dir and shorten_enabled(cfg) else None,
