@@ -38,6 +38,87 @@ def _lean_output() -> bool:
     return os.environ.get('PYVIDEOTRANS_LEAN_OUTPUT', '') == '1'
 
 
+PREP_LOW_ENV = 'PYVIDEOTRANS_PREP_LOW'
+
+
+def set_low_priority(low: bool) -> None:
+    """Tiến trình chuẩn bị tiếng trước (PYVIDEOTRANS_PREP_LOW=1) chạy ưu tiên thấp để không giành CPU của video
+    đang mã hoá; tới lượt render thì trả lại bình thường. Windows: ffmpeg con mở sau đó thừa hưởng mức này."""
+    try:
+        import psutil
+        p = psutil.Process()
+        if sys.platform == 'win32':
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if low else psutil.NORMAL_PRIORITY_CLASS)
+        elif low:
+            p.nice(10)   # Unix không hạ xong nâng lại được nếu không có quyền root: chỉ hạ
+    except Exception:  # noqa: BLE001 - không đổi được thì chạy như thường
+        pass
+
+
+class _RenderSlot:
+    """PYVIDEOTRANS_RENDER_SLOTS="<thư mục>|<n>": dub_all mở trước tiến trình ngôn ngữ kế tiếp để nó chuẩn bị
+    tiếng (ghép câu, nhạc nền, đo âm lượng ~1-3 phút) trong lúc ngôn ngữ trước đang mã hoá hình, nhưng chỉ n
+    tiến trình được mã hoá cùng lúc: khoá file render-<i>.lock, tiến trình chết thì Windows tự nhả khoá.
+    Chưa đặt biến thì không chờ gì."""
+
+    def __init__(self):
+        self.fh = None
+        spec = os.environ.get('PYVIDEOTRANS_RENDER_SLOTS', '').strip()
+        if not spec:
+            return
+        folder, _, n = spec.rpartition('|')
+        try:
+            n = max(1, int(n))
+            Path(folder).mkdir(parents=True, exist_ok=True)
+        except (ValueError, OSError):
+            return
+        started, told = time.time(), 0
+        while True:
+            for i in range(n):
+                fh = open(Path(folder) / f'render-{i}.lock', 'a+b')
+                try:
+                    self._lock(fh)
+                    self.fh = fh
+                    if os.environ.get(PREP_LOW_ENV) == '1':
+                        set_low_priority(False)
+                    if told:
+                        print(f'Đã tới lượt render sau {int(time.time() - started)}s', flush=True)
+                    return
+                except OSError:
+                    fh.close()
+            # in đều đặn để dub_all không tưởng tiến trình bị treo
+            if time.time() - started >= told * 60:
+                print('Tiếng đã chuẩn bị xong, chờ ngôn ngữ trước render xong...', flush=True)
+                told += 1
+            time.sleep(1)
+
+    @staticmethod
+    def _lock(fh):
+        if sys.platform == 'win32':
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def release(self):
+        if not self.fh:
+            return
+        try:
+            if sys.platform == 'win32':
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.fh.close()
+        self.fh = None
+
+
 class AssembleMixin:
 
     def assembling(self) -> None:
@@ -229,6 +310,9 @@ class AssembleMixin:
         if _video_output_ext!='.mp4':
             subtitle_langcode=translator.get_mkv_code(subtitle_langcode)
 
+        # Tiếng + phụ đề đã sẵn sàng; phần dưới mã hoá lại cả hình -> chờ tới lượt (lỗi giữa chừng thì tiến
+        # trình kết thúc, khoá tự nhả)
+        slot = _RenderSlot()
         audio_ms = get_audio_time(target_m4a)
         a_v_offset=audio_ms-duration_ms
 
@@ -375,7 +459,9 @@ class AssembleMixin:
                         runffmpeg(cmd0 + cmd1 + subtitle_filter + cmd2 + enc_qua + cmd3,
                                         cmd_dir=self.cfg.cache_folder, force_cpu=True)
         except Exception as e:
+            slot.release()
             raise VideoTransError(tr('Error in embedding the final step of the subtitle dubbing')+str(e)) from e
+        slot.release()
 
         if Path(tmp_target_mp4).exists():
             try:

@@ -18,6 +18,57 @@ from videotrans.util._srt_parse import get_subtitle_from_srt, ms_to_time_string
 from videotrans.util.help_misc import get_prompt, get_tanslate_type
 
 
+# Model hết hạn mức báo "Unavailable (reset after 138h 20m 17s)" (9Router, 10/2026): mỗi lô dịch gọi nó trước
+# rồi mới đổi model -> 184 lượt gọi hỏng / video. Ghi lại hạn mở lại vào file dùng chung cho mọi tiến trình
+# dịch (mỗi ngôn ngữ 1 tiến trình), tới hạn thì tự dùng lại. Chỉ ghi khi chờ từ 10 phút trở lên.
+COOLDOWN_FILE = Path(ROOT_DIR) / 'videotrans' / 'model_cooldown.json'
+_RESET_RE = re.compile(r'reset after\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?', re.I)
+_cooldown_cache = {}
+
+
+def _cooling_models(ainame: str) -> set:
+    """Model của kênh này đang chờ mở lại hạn mức"""
+    import json
+    try:
+        mtime = COOLDOWN_FILE.stat().st_mtime
+    except OSError:
+        return set()
+    if _cooldown_cache.get('mtime') != mtime:
+        try:
+            _cooldown_cache.update(mtime=mtime, data=json.loads(COOLDOWN_FILE.read_text(encoding='utf-8')))
+        except (OSError, ValueError):
+            _cooldown_cache.update(mtime=mtime, data={})
+    now = time.time()
+    return {m for m, until in (_cooldown_cache['data'].get(ainame) or {}).items() if until > now}
+
+
+def _mark_cooling(ainame: str, model_name: str, message: str) -> None:
+    import json
+    m = _RESET_RE.search(str(message or ''))
+    if not m or not any(m.groups()):
+        return
+    h, mi, s = (int(x or 0) for x in m.groups())
+    seconds = h * 3600 + mi * 60 + s
+    if seconds < 600:
+        return
+    try:
+        data = json.loads(COOLDOWN_FILE.read_text(encoding='utf-8')) if COOLDOWN_FILE.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    now = time.time()
+    chan = {k: v for k, v in (data.get(ainame) or {}).items() if v > now}
+    chan[model_name] = now + seconds
+    data[ainame] = chan
+    try:
+        tmp = COOLDOWN_FILE.with_suffix(f'.{random.randrange(10 ** 6)}.tmp')
+        tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        tmp.replace(COOLDOWN_FILE)
+        logger.warning(f'[{ainame}] {model_name} hết hạn mức, bỏ qua tới '
+                       f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(now + seconds))}')
+    except OSError:
+        pass
+
+
 @dataclass
 class OpenAICampat(BaseTrans):
     ainame:str=None
@@ -59,7 +110,7 @@ class OpenAICampat(BaseTrans):
     def _model_chain(self) -> List[str]:
         # 模型可填多个（逗号分隔）：按顺序使用，前一个 404/429/余额不足等失败时自动换下一个
         models = [m.strip() for m in str(self.model_name or '').split(',') if m.strip()] or [self.model_name]
-        dead = getattr(self, '_dead_models', set())
+        dead = getattr(self, '_dead_models', set()) | _cooling_models(self.ainame)
         # 404/400 类（模型不存在、渠道已关闭）本次任务内不再尝试；全部失效时仍按原顺序重试
         return [m for m in models if m not in dead] or models
 
@@ -153,6 +204,7 @@ class OpenAICampat(BaseTrans):
                     if e.status_code in (400, 404):
                         self._dead_models = getattr(self, '_dead_models', set()) | {model_name}
                     msg = (e.body.get('message') if isinstance(e.body, dict) else None) or e.message
+                    _mark_cooling(self.ainame, model_name, msg)
                     logger.warning(f'[{self.ainame}] 模型 {model_name} 返回 {e.status_code}: {msg}，改用下一个模型 {models[mi + 1]}')
                     self.signal(text=f'[{self.ainame}] {model_name} lỗi {e.status_code}, chuyển sang {models[mi + 1]}')
         except APIConnectionError as e:

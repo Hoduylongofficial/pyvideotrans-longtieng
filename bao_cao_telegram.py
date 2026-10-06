@@ -105,6 +105,7 @@ def zip_logs(workdir: Path, tag: str) -> Path:
     subs = workdir / 'subs'
     files = [workdir / 'dub_all.log', workdir / 'report.md'] + \
         sorted(p for p in (workdir / 'logs').glob('*') if p.is_file()) + \
+        sorted((workdir / 'logs' / 'qc_audio').glob('*/*.mp3')) + \
         sorted(subs.glob('*.srt')) + sorted((subs / '_loi').glob('*.srt')) + [subs / '_thuat_ngu' / 'terms.json']
     files = [p for p in files if p.exists()]
     out_dir = workdir / 'logs' / '_telegram'
@@ -282,7 +283,8 @@ def report_done(cfg: dict, workdir: Path, video: Path, report: Path, summary: st
         if len(trouble) > 12:
             text += f'\n… và {len(trouble) - 12} dòng nữa (trong file zip)'
     text += ('\n\nFile zip: report.md, dub_all.log, logs/qa-*.txt (soát dịch), logs/qc-*.txt (câu giọng '
-             'lệch), subs/*.srt (bản dịch)')
+             'lệch) + logs/qc_audio/<mã>/*.mp3 (nghe đúng câu đó), logs/rutgon-*.txt (câu viết ngắn lại), '
+             'subs/*.srt (bản dịch)')
     _safe(log, 'báo cáo', lambda: send(text, [zip_logs(workdir, 'loi' if failed or trouble else 'xong')]))
 
 

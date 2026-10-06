@@ -587,6 +587,13 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # dub_all: ngôn ngữ chuẩn bị tiếng trước trong lúc ngôn ngữ khác đang render -> ưu tiên thấp, tới lượt
+    # render thì trả lại bình thường (_stage_assemble._RenderSlot)
+    import os
+    if os.environ.get('PYVIDEOTRANS_PREP_LOW') == '1':
+        from videotrans.task._stage_assemble import set_low_priority
+        set_low_priority(True)
+
     # Handle --list before other validation
     if args.list:
         if args.list == 'providers':

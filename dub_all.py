@@ -438,12 +438,13 @@ def attempt(cfg: dict, log: Log, head: str, task_log: Path, cli_args: list,
 # Kiểm tra bản dịch trước khi lồng tiếng — dịch hỏng mà vẫn render thì tốn giờ render + tiền GPU
 # ---------------------------------------------------------------------------
 # Tốc độ nói của giọng OmniVoice (ký tự/giây, tính cả dấu cách), làm "ngân sách" độ dài câu cho prompt dịch.
-# Đo thật (09/2026, video MEXC 98 câu, trung vị): de 18.2, es 18.3, ja 9.1. Các ngôn ngữ khác suy ra theo
-# độ dài chữ tương đối, chưa đo. Đặt thấp quá thì AI cắt mất ý (đã gặp: mất chữ "USDT", mất vế so sánh).
-# Hán/Nhật/Hàn mỗi ký tự là 1 âm tiết nên số nhỏ hơn nhiều. Ghi đè bằng "speech_cps" trong config.
-SPEECH_CPS = {'default': 17, 'de': 18, 'es': 18, 'it': 18, 'pt': 18, 'id': 18, 'ms': 18, 'fil': 18,
-              'ja': 9, 'zh': 6, 'ko': 8, 'th': 12, 'ar': 15, 'hi': 16, 'ru': 16, 'uk': 16, 'pl': 16,
-              'cs': 16, 'fi': 16, 'el': 16}
+# Đo thật (10/2026, video hosting 129 câu x 25 ngôn ngữ, trung vị sau khi đọc lại cho vừa khung): phần lớn
+# 18-19, de 20.8, tr 21.9, da 22.9, fil 21.4, th 21.2, ar 17.4, hi 17.0, ja 9.9, ko 10.6, zh 7.2. Lấy thấp
+# hơn số đo một chút (bản đo có câu đã đọc nhanh). Đặt thấp quá thì "dài quá khung" báo nhầm (th cũ 12 ->
+# 9 câu báo nhầm). Hán/Nhật/Hàn mỗi ký tự là 1 âm tiết nên số nhỏ hơn nhiều. Ghi đè bằng "speech_cps".
+SPEECH_CPS = {'default': 17, 'de': 19, 'es': 18, 'it': 18, 'pt': 18, 'id': 17, 'ms': 19, 'fil': 20,
+              'ja': 9, 'zh': 7, 'ko': 10, 'th': 19, 'ar': 16, 'hi': 16, 'ru': 18, 'uk': 17, 'pl': 17,
+              'cs': 17, 'fi': 17, 'el': 18, 'tr': 20, 'da': 21}
 # Hệ chữ riêng: câu dịch không có ký tự nào của hệ chữ này mà toàn chữ Latin = chưa dịch / sai ngôn ngữ
 SCRIPT_RE = {'ar': r'[؀-ۿ]', 'ja': r'[぀-ヿ一-鿿]', 'ko': r'[가-힯]',
              'ru': r'[Ѐ-ӿ]', 'uk': r'[Ѐ-ӿ]', 'el': r'[Ͱ-Ͽ]',
@@ -486,6 +487,22 @@ def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str, 
     def words(text):
         return re.findall(r"[^\W\d_]+", text.casefold())
 
+    # Tên phải giữ nguyên (SiteGround, Hostinger...) là chữ Latin hợp lệ trong câu tiếng Nga / Thái...:
+    # "SiteGround: $683.52" không phải "sai hệ chữ"
+    keep_re = re.compile('|'.join(rf'(?<!\w){re.escape(k)}(?!\w)' for k in sorted(keep, key=len, reverse=True)),
+                         re.I) if keep else None
+
+    def foreign_latin(text):
+        return len(re.findall(r'[A-Za-z]', keep_re.sub(' ', text) if keep_re else text))
+
+    def has_term(term, text):
+        """Tên vẫn còn trong câu dịch, kể cả khi bị chia đuôi theo ngữ pháp (tiếng Séc "Googlu",
+        tiếng Phần Lan "Hostingerin")"""
+        t, k = text.casefold(), term.casefold()
+        if k in t:
+            return True
+        return len(k) >= 5 and re.search(rf'(?<!\w){re.escape(k[:-1])}\w{{0,4}}', t) is not None
+
     for i, t in enumerate(tgt):
         text = t['text'].strip()
         s = src[i]['text'].strip() if i < len(src) else ''
@@ -496,7 +513,7 @@ def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str, 
             kind = 'junk'
         elif code.split('-')[0] != 'en' and len(words(s)) >= 3 and words(text) == words(s):
             kind = 'untranslated'
-        elif script and not re.search(script, text) and len(re.findall(r'[A-Za-z]', text)) >= 6:
+        elif script and not re.search(script, text) and foreign_latin(text) >= 6:
             kind = 'script'
         elif latin_target and len(words(text)) >= 5 \
                 and sum(w in EN_WORDS for w in words(text)) / len(words(text)) >= 0.35:
@@ -504,7 +521,7 @@ def check_translation(cfg: dict, source_sub: Path, target_sub: Path, code: str, 
         else:
             seconds = (t['end_time'] - t['start_time']) / 1000
             lost = [k for k in keep if re.search(rf'(?<!\w){re.escape(k)}(?!\w)', s)
-                    and k.casefold() not in text.casefold()]
+                    and not has_term(k, text)]
             if lost:
                 kind = 'term'
                 text = f'[{", ".join(lost)}] {text}'
@@ -592,8 +609,9 @@ class RamGate:
     PROC_MB = 500       # 1 tiến trình dịch
     RESERVE_MB = 1500   # để dành cho render / Windows
 
-    def __init__(self, log: Log):
+    def __init__(self, log: Log, what: str = 'dịch'):
         self.log = log
+        self.what = what
         self.running = 0
         self.cond = threading.Condition()
 
@@ -611,7 +629,7 @@ class RamGate:
         with self.cond:
             while self.running > 0 and self.free_mb() < need:
                 if not told:
-                    self.log(f'{head} — chờ RAM trống để dịch (còn {self.free_mb()} MB, cần {need} MB)...')
+                    self.log(f'{head} — chờ RAM trống để {self.what} (còn {self.free_mb()} MB, cần {need} MB)...')
                     told = True
                 self.cond.wait(5)
             self.running += 1
@@ -696,6 +714,115 @@ def build_speak_text(cfg: dict, code: str, target_sub: Path, subs_dir: Path, log
         log(f'{head} — [CẢNH BÁO] không tạo được chữ để đọc cho số / ký hiệu ({e}), giọng đọc thẳng phụ đề')
         return ''
     return f'{done}/{need} câu có số / ký hiệu đã viết lại để đọc' if need else ''
+
+
+# ---------------------------------------------------------------------------
+# Viết ngắn câu đọc quá nhanh: bản dịch tự nhiên dài hơn tiếng Anh, vài câu phải tua 1.3-1.8 lần mới vừa
+# khung (log 10/2026: tiếng Ả Rập 22/129 câu, Hindi 10) -> nghe dồn. Sau khi tạo giọng, chỉ các câu đó được
+# AI viết ngắn lại (giữ ý, số, tên riêng) rồi đọc lại; phụ đề trên hình đổi theo cho khớp lời.
+# ---------------------------------------------------------------------------
+SHORTEN_PROMPT = """You edit {lang} dubbing lines that are too long for their time slot: the voice has to speed up a lot to fit, which sounds rushed.
+Each line in <INPUT> has the form "id<TAB>max_chars<TAB>English original<TAB>current {lang} line". Rewrite the {lang} line in at most max_chars characters:
+- Keep the full meaning of the English original, every number and price exactly as written (same digits), and every brand / product name.
+- Write it the way a native {lang} YouTuber would say it: natural spoken {lang}, same tone and same form of address as the current line. Drop filler words, prefer shorter words and simpler sentence structure. No abbreviations, no chat shorthand, no symbols in place of words.
+- If the meaning cannot fit in max_chars, make it as short as possible while keeping the meaning.
+Answer with JSON only, mapping each id to the rewritten line: {{"1": "...", "2": "..."}}, wrapped in <TRANSLATE_TEXT></TRANSLATE_TEXT>.
+
+<INPUT>
+{{batch_input}}
+</INPUT>"""
+
+
+def shorten_enabled(cfg: dict) -> bool:
+    from videotrans.translator._constants import AI_TRANS_CHANNELS
+    return float(cfg.get('tts_shorten_ratio', 1.3) or 0) > 0 and \
+        int(cfg.get('translate_type', 0)) in AI_TRANS_CHANNELS
+
+
+def shorten_lines(cfg: dict, code: str, rows: list, subs_dir: Path, logs_dir: Path, log: Log) -> dict:
+    """rows = [(câu phụ đề, câu đọc, giây khung, giây đang chiếm)] -> {câu phụ đề: câu mới}.
+    Sửa luôn subs/<mã>.srt và chữ để đọc (subs/_chu_doc) để lúc render đọc + hiện đúng câu mới. Câu AI viết
+    mà mất số / mất tên riêng / không ngắn hơn thì bỏ, giữ câu cũ."""
+    import gop_cau
+    import thuat_ngu
+    from videotrans.tts._dub_text import flat
+    from videotrans.translator._lang_utils import get_source_target_code
+    from videotrans.util.help_srt import get_subtitle_from_srt
+
+    target_sub = subs_dir / f'{code}.srt'
+    items = get_subtitle_from_srt(str(target_sub))
+    source = get_subtitle_from_srt(str(subs_dir / f'{cfg.get("source_language", "en")}.srt'))
+    english = {flat(it['text']): flat(source[i]['text']) for i, it in enumerate(items) if i < len(source)}
+    keep = thuat_ngu.keep_terms(subs_dir / '_thuat_ngu')
+
+    todo = []
+    for sub, _, window, spoken in rows:
+        old = flat(sub)
+        # Phần lời (bỏ 0.48s im lặng + đệm) phải co lại theo tỉ lệ khung / đang chiếm; cho dư 15%: phần
+        # thừa nhỏ thì đọc lại theo khung + tua nhẹ vẫn tự nhiên
+        ratio = max(window - 0.48, 0.3) / max(spoken - 0.48, 0.3)
+        limit = min(len(old) - 1, int(len(old) * ratio * 1.15))
+        if old and limit >= 4:
+            todo.append((sub, old, limit, spoken / window))
+    if not todo:
+        return {}
+
+    _, lang_name = get_source_target_code(show_target=code, translate_type=int(cfg.get('translate_type', 0)))
+    listing = '\n'.join(f'{n}\t{limit}\t{english.get(old, "")}\t{old}'
+                        for n, (_, old, limit, _) in enumerate(todo, start=1))
+    import chu_doc
+    data = chu_doc._parse(thuat_ngu._llm(cfg, SHORTEN_PROMPT.format(lang=lang_name), listing, code))
+
+    def numbers(text):
+        return sorted(re.findall(r'\d+', text))
+
+    changed, report = {}, []
+    for n, (sub, old, limit, speed) in enumerate(todo, start=1):
+        new = flat(str(data.get(str(n)) or ''))
+        lost = [k for k in keep if k != '$' and k.casefold() in old.casefold() and k.casefold() not in new.casefold()]
+        why = ('AI không trả' if not new else 'mất số' if numbers(new) != numbers(old)
+               else f'mất tên {", ".join(lost)}' if lost else 'không ngắn hơn' if len(new) > 0.95 * len(old) else '')
+        report += [f'  [tua {speed:.2f} lần] cũ : {old}', f'                  mới: {new or "-"}'
+                   + (f'   (giữ câu cũ: {why})' if why else ''), '']
+        if not why:
+            changed[sub] = new
+    (logs_dir / f'rutgon-{code}.txt').write_text(
+        f'Câu viết ngắn lại [{code}] — {time.strftime("%Y-%m-%d %H:%M:%S")}\n\n'
+        f'Câu bản dịch dài, giọng đọc phải tua nhanh quá {cfg.get("tts_shorten_ratio", 1.3)} lần mới vừa khung '
+        f'-> AI viết ngắn lại (giữ ý, số, tên riêng), phụ đề trên hình đổi theo.\n\n' + '\n'.join(report),
+        encoding='utf-8')
+    if not changed:
+        return {}
+
+    # Phụ đề: thay đúng các câu đã viết ngắn (giữ nguyên thời gian)
+    by_flat = {flat(k): v for k, v in changed.items()}
+    out = [gop_cau._cue(it['start_time'], it['end_time'], by_flat.get(flat(it['text']), it['text']))
+           for it in items]
+    tmp = target_sub.with_suffix('.tmp')
+    gop_cau.write_srt(tmp, out)
+    tmp.replace(target_sub)
+
+    # Chữ để đọc: câu mới có số / ký hiệu thì nhờ AI viết lại cách đọc như lúc dịch xong
+    if speak_enabled(cfg):
+        folder = subs_dir / SPEAK_DIR
+        path = folder / f'{code}.json'
+        try:
+            cached = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            cached = {}
+        mapping = {k: v for k, v in (cached.get('map') or {}).items() if flat(k) not in by_flat}
+        need = [t for t in by_flat.values() if chu_doc.needs_speaking(t)]
+        try:
+            for t, spoken in (chu_doc._ask(cfg, lang_name, code, need) if need else {}).items():
+                if spoken != t and len(spoken) <= 4 * len(t) + 40:
+                    mapping[t] = spoken
+        except Exception as e:  # noqa: BLE001 - không có thì giọng đọc thẳng câu phụ đề mới
+            log(f'  [{code}] [CẢNH BÁO] không tạo được chữ để đọc cho câu viết ngắn ({e})')
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'src': chu_doc._md5(target_sub), 'map': mapping}, ensure_ascii=False,
+                                   indent=2), encoding='utf-8')
+    log(f'  [{code}] viết ngắn lại {len(changed)}/{len(rows)} câu đọc quá nhanh — xem logs/rutgon-{code}.txt')
+    return changed
 
 
 def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
@@ -1202,10 +1329,31 @@ def subtitle_windows(items: list, video_seconds: float) -> dict:
     return windows
 
 
+QC_AUDIO_DIR = 'qc_audio'
+
+
+def _qc_clip(src, dest: Path) -> bool:
+    """Trích giọng của 1 câu bị báo lệch ra mp3 nhỏ (logs/qc_audio/<mã>/), gửi kèm zip Telegram để nghe kiểm
+    mà không phải mở video tìm đúng chỗ."""
+    try:
+        if not src or not Path(src).is_file():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['ffmpeg', '-y', '-hide_banner', '-nostdin', '-loglevel', 'error', '-i', str(src),
+                        '-ac', '1', '-b:a', '64k', str(dest)], capture_output=True, timeout=60,
+                       creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+        return dest.is_file()
+    except Exception:  # noqa: BLE001 - không trích được thì báo cáo chỉ có chữ
+        return False
+
+
 def write_tts_qc_report(path: Path, code: str, rows: list, median: float = None) -> None:
-    """logs/qc-<mã>.txt: câu mà Whisper nghe lại vẫn lệch sau các lần đọc lại -> người dùng nghe kiểm."""
+    """logs/qc-<mã>.txt: câu mà Whisper nghe lại vẫn lệch sau các lần đọc lại -> người dùng nghe kiểm.
+    rows: [(câu, nghe được, điểm, file giọng)]; mỗi câu kèm 1 file mp3 trong logs/qc_audio/<mã>/."""
     from videotrans.tts._omnivoice_modal import QC_HEALTHY_MEDIAN
     weak = median is not None and median < QC_HEALTHY_MEDIAN
+    audio_dir = path.parent / QC_AUDIO_DIR / code
+    shutil.rmtree(audio_dir, ignore_errors=True)
     if not rows:
         path.unlink(missing_ok=True)
         return
@@ -1220,8 +1368,13 @@ def write_tts_qc_report(path: Path, code: str, rows: list, median: float = None)
         lines += ['Câu dưới đây Whisper nghe ra khác câu yêu cầu (đọc sót / lặp / sai từ) dù đã đọc lại. '
                   'Điểm 0-1, càng thấp càng lệch.', 'Nghe kiểm trong video; sửa chữ trong phụ đề hoặc thêm '
                   'cách đọc vào phat_am.json rồi chạy lại.', '']
-    for text, heard, score in sorted(rows, key=lambda r: r[2]):
-        lines += [f'  [{score:.2f}] cần đọc : {text}', f'         nghe được: {heard}', '']
+    for n, row in enumerate(sorted(rows, key=lambda r: r[2]), start=1):
+        text, heard, score = row[:3]
+        lines += [f'  [{score:.2f}] cần đọc : {text}', f'         nghe được: {heard}']
+        clip = audio_dir / f'{n:02d}.mp3'
+        if len(row) > 3 and _qc_clip(row[3], clip):
+            lines.append(f'         file nghe: {clip.relative_to(path.parent).as_posix()}')
+        lines.append('')
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
@@ -1305,11 +1458,16 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
                            qc_min=float(cfg.get('tts_qc_min', 0.75) or 0),
                            qc_retries=int(cfg.get('tts_qc_retries', 2)),
                            on_qc=(lambda code, rows, med: write_tts_qc_report(logs_dir / f'qc-{code}.txt', code, rows, med))
-                           if logs_dir else None)
+                           if logs_dir else None,
+                           shorten=(lambda code, rows: shorten_lines(cfg, code, rows, subs_dir, logs_dir, log))
+                           if logs_dir and shorten_enabled(cfg) else None,
+                           shorten_ratio=float(cfg.get('tts_shorten_ratio', 1.3) or 0))
             done = sum(v[0] for v in res.values())
             refit = sum(v[2] for v in res.values())
+            short = sum(v[4] for v in res.values() if len(v) > 4)
             log(f'  Tạo sẵn giọng xong sau {fmt_duration(time.time() - started)}: {done} câu, '
-                f'{len(res)} ngôn ngữ' + (f', {refit} câu đọc lại cho vừa khung' if refit else ''))
+                f'{len(res)} ngôn ngữ' + (f', {refit} câu đọc lại cho vừa khung' if refit else '')
+                + (f', {short} câu viết ngắn lại' if short else ''))
         except Exception as e:  # noqa: BLE001 - tạo sẵn lỗi thì lúc render tự đọc như cũ
             log(f'  [CẢNH BÁO] Tạo sẵn giọng lỗi ({e}), sẽ đọc trong lúc lồng tiếng.')
         finally:
@@ -1331,6 +1489,7 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
     is_separate = bool(cfg.get('is_separate'))
     sep_dir = out_dir.parent / '_separate'
     results = {}
+    ahead = 0   # số ngôn ngữ chuẩn bị tiếng trước (đặt bên dưới, dub_one đọc lúc chạy)
 
     if is_separate and not (sep_dir / 'instrument.wav').exists():
         log('  Giữ nhạc nền + SFX: sẽ tách nhạc khỏi giọng nói ở ngôn ngữ đầu tiên')
@@ -1413,6 +1572,9 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
                'PYVIDEOTRANS_VIDEO_ENC_FALLBACK': json.dumps(enc['fallback']),
                # không xuất thêm file .m4a tiếng gốc / tiếng lồng vào thư mục ngôn ngữ (không dùng tới)
                'PYVIDEOTRANS_LEAN_OUTPUT': '1'}
+        if ahead:
+            # chuẩn bị tiếng ưu tiên thấp, tới lượt render mới trả lại bình thường (_stage_assemble._RenderSlot)
+            env['PYVIDEOTRANS_PREP_LOW'] = '1'
         if int(cfg.get('subtitle_type', 1)) in (1, 3) and not cfg.get('video_autorate'):
             # đằng nào cũng mã hoá lại để nhúng phụ đề: đọc thẳng hình từ video gốc,
             # khỏi tạo novoice.mp4 (bản sao cả video) cho từng ngôn ngữ
@@ -1463,39 +1625,113 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
         log(f'{head} — LỖI (chi tiết: {logs_dir / f"dub-{code}.log"})')
         return code, 'failed'
 
-    # OmniVoice trên GPU Modal: giọng đã tạo sẵn (hoặc đọc trên máy chủ), phần còn lại là render
-    # trên máy này -> số ngôn ngữ làm cùng lúc theo sức máy (dub_parallel, "auto" = tự chọn).
-    # Edge-TTS giữ lần lượt vì Microsoft chặn khi gọi dồn dập.
-    parallel = 1 if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS else render_parallel(cfg, log)
+    # Edge-TTS giữ lần lượt (có nghỉ giữa các ngôn ngữ) vì Microsoft chặn khi gọi dồn dập.
     todo = list(enumerate(langs, start=1))
-    if parallel == 1 or len(todo) <= 1:
+    if int(cfg.get('tts_type', EDGE_TTS)) == EDGE_TTS:
         for n, (i, lang) in enumerate(todo, start=1):
             code, status = dub_one(i, lang, quiet=False)
             results[code] = status
             if status == 'ok' and n < len(todo) and sleep_between > 0:
                 time.sleep(sleep_between)
-    else:
-        # Tách nhạc nền chỉ làm 1 lần ở ngôn ngữ đầu: chạy riêng nó trước rồi mới chạy song song
-        if is_separate and not (sep_dir / 'instrument.wav').exists():
-            first = next((k for k, (_, l) in enumerate(todo)
-                          if not find_final_video(final_dir, l, video.stem)), None)
-            if first is not None:
-                i, lang = todo.pop(first)
-                code, status = dub_one(i, lang, quiet=False)
-                results[code] = status
-        log(f'  Lồng tiếng + render {parallel} ngôn ngữ cùng lúc '
-            f'(sửa "dub_parallel" trong dub_all.config.json để đổi).')
-        log('  Output chi tiết của từng ngôn ngữ nằm trong logs/dub-<mã>.log')
-        with ThreadPoolExecutor(max_workers=parallel) as pool:
-            futures = [pool.submit(dub_one, i, lang, True) for i, lang in todo]
-            for fut in as_completed(futures):
-                try:
-                    code, status = fut.result()
-                except Exception as e:  # noqa: BLE001 - 1 ngôn ngữ hỏng không làm sập cả loạt
-                    log(f'  LỖI không mong đợi: {e}')
-                    continue
-                results[code] = status
+        return finish_dub(cfg, out_dir, results)
 
+    # OmniVoice trên GPU Modal: giọng đã tạo sẵn, phần còn lại là render trên máy này -> số video mã hoá
+    # cùng lúc theo sức máy (dub_parallel, "auto" = tự chọn).
+    parallel = render_parallel(cfg, log)
+    # Mỗi ngôn ngữ ~1-3 phút chuẩn bị tiếng (ghép câu, tua, nhạc nền, đo âm lượng) rồi ~3.5 phút mã hoá hình.
+    # Mở trước dub_prep_ahead tiến trình để ngôn ngữ sau chuẩn bị tiếng trong lúc ngôn ngữ trước mã hoá, khoá
+    # render (_stage_assemble._RenderSlot) giữ đúng `parallel` video mã hoá cùng lúc. Log 10/2026: 25 lượt
+    # render nối đuôi, mỗi lượt ~1m15s chuẩn bị tiếng nằm trên đường găng.
+    ahead = prep_ahead(cfg)
+    if ahead:
+        env_slots = f'{out_dir.parent / "_render_lock"}|{parallel}'
+        os.environ['PYVIDEOTRANS_RENDER_SLOTS'] = env_slots
+    else:
+        os.environ.pop('PYVIDEOTRANS_RENDER_SLOTS', None)
+    workers = parallel + ahead
+
+    # Tách nhạc nền chỉ làm 1 lần ở ngôn ngữ đầu: chạy riêng nó trước rồi mới chạy song song
+    if workers > 1 and is_separate and not (sep_dir / 'instrument.wav').exists():
+        first = next((k for k, (_, l) in enumerate(todo)
+                      if not find_final_video(final_dir, l, video.stem)), None)
+        if first is not None:
+            i, lang = todo.pop(first)
+            code, status = dub_one(i, lang, quiet=False)
+            results[code] = status
+
+    def ready(lang) -> bool:
+        """Ngôn ngữ làm được ngay: đã dịch xong và đã có giọng (hoặc đã xong / còn sót video từ lần trước)"""
+        code = lang['code']
+        if find_final_video(final_dir, lang, video.stem) or find_output_video(out_dir / code, video.stem):
+            return True
+        if translated and code in translated and not translated[code].is_set():
+            return False
+        event = tts.ready.get(code) if tts else None
+        return event is None or event.is_set()
+
+    pending, pick_lock = list(todo), threading.Lock()
+    ram = RamGate(log, what='chuẩn bị ngôn ngữ tiếp theo')
+
+    def pick():
+        """Ngôn ngữ kế tiếp: ngôn ngữ nào xong dịch + giọng trước làm trước, không chờ theo thứ tự danh sách
+        (log 10/2026: giọng tiếng Đức xong lúc 02:47 nhưng phải chờ tiếng Ả Rập đứng đầu tới 02:52)."""
+        told = set()
+        while True:
+            with pick_lock:
+                if not pending:
+                    return None
+                job = next((x for x in pending if ready(x[1])), None)
+                if job:
+                    pending.remove(job)
+                    return job
+                first = pending[0]
+            code = first[1]['code']
+            if code not in told:
+                told.add(code)
+                waits = 'dịch xong' if translated and code in translated and not translated[code].is_set() \
+                    else 'tạo giọng trên GPU Modal'
+                log(f'  [{first[0]}/{len(langs)}] {code:<6} {first[1].get("name", "")} — chờ {waits}...')
+            time.sleep(2)
+
+    def worker():
+        while True:
+            job = pick()
+            if not job:
+                return
+            i, lang = job
+            # Tiến trình thứ 2 trở đi chỉ mở khi máy còn RAM (máy 8 GB đang dịch song song thì chờ)
+            ram.acquire(f'  [{i}/{len(langs)}] {lang["code"]:<6} {lang.get("name", "")}')
+            try:
+                code, status = dub_one(i, lang, quiet=workers > 1)
+            except Exception as e:  # noqa: BLE001 - 1 ngôn ngữ hỏng không làm sập cả loạt
+                log(f'  LỖI không mong đợi ({lang["code"]}): {e}')
+                code, status = lang['code'], 'failed'
+            finally:
+                ram.release()
+            results[code] = status
+
+    if workers > 1:
+        log(f'  Render {parallel} video cùng lúc' + (f', chuẩn bị tiếng trước {ahead} ngôn ngữ trong lúc chờ render'
+                                                     if ahead else '')
+            + ' (sửa "dub_parallel" / "dub_prep_ahead" trong dub_all.config.json để đổi).')
+        log('  Output chi tiết của từng ngôn ngữ nằm trong logs/dub-<mã>.log')
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return finish_dub(cfg, out_dir, results)
+
+
+def prep_ahead(cfg: dict) -> int:
+    """Số ngôn ngữ chuẩn bị tiếng trước trong lúc chờ render ("auto" = 1)."""
+    value = str(cfg.get('dub_prep_ahead', 'auto')).strip().lower()
+    if value.isdigit():
+        return int(value)
+    return 1
+
+
+def finish_dub(cfg: dict, out_dir: Path, results: dict) -> dict:
     if cfg.get('cleanup_out', True) and out_dir.is_dir() and not any(out_dir.iterdir()):
         out_dir.rmdir()
     return results

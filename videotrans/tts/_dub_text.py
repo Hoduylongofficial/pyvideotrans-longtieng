@@ -52,9 +52,13 @@ def _n2w_lang(lang: str):
 # (trừ chính số 0 hoặc 0,5), tối đa 7 chữ số. Phần thập phân 1-2 chữ số (3 chữ số thì nhiều khả năng
 # là phân cách hàng nghìn kiểu Đức: 1.000).
 _NUM_RE = re.compile(r'(?<![\w.,:/\-$€£¥])(0|[1-9]\d{0,6})(?:([.,])(\d{1,2}))?(?![\w:/\-]|[.,]\d|\s?%)')
+# Bản "lỏng" chỉ để chấm: số dính liền chữ bản xứ không phải Latin ("52센트", "48ヶ月") vẫn đổi. Không dùng
+# để đọc: "3개" tiếng Hàn đọc "세 개" (số thuần Hàn), num2words ra "삼".
+_NUM_LOOSE_RE = re.compile(r'(?<![A-Za-zÀ-ɏ0-9_.,:/\-$€£¥])(0|[1-9]\d{0,6})(?:([.,])(\d{1,2}))?'
+                           r'(?![A-Za-zÀ-ɏ0-9_:/\-]|[.,]\d|\s?%)')
 
 
-def spell_numbers(text: str, lang: str) -> str:
+def spell_numbers(text: str, lang: str, loose: bool = False) -> str:
     code = _n2w_lang(lang)
     if not code or not re.search(r'\d', text):
         return text
@@ -70,7 +74,39 @@ def spell_numbers(text: str, lang: str) -> str:
         except Exception:  # noqa: BLE001 - num2words thiếu luật cho trường hợp này: giữ nguyên
             return m.group(0)
 
-    return _NUM_RE.sub(repl, text)
+    return (_NUM_LOOSE_RE if loose else _NUM_RE).sub(repl, text)
+
+
+# Chữ số Hán -> chữ số Ả Rập, chỉ để chấm tiếng Trung: câu đọc viết "三十六個月", Whisper ghi "36个月"
+# (num2words không có tiếng Trung). Đổi cả 2 phía nên "一下" -> "1下" ở cả 2 vẫn khớp nhau.
+_ZH_DIGIT = {'零': 0, '〇': 0, '一': 1, '二': 2, '兩': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7,
+             '八': 8, '九': 9}
+_ZH_UNIT = {'十': 10, '百': 100, '千': 1000}
+_ZH_BIG = {'萬': 10 ** 4, '万': 10 ** 4, '億': 10 ** 8, '亿': 10 ** 8}
+_ZH_NUM_RE = re.compile('[零〇一二兩两三四五六七八九十百千萬万億亿]+(?:[點点][零〇一二三四五六七八九]+)?')
+
+
+def _zh_int(s: str) -> str:
+    if not any(ch in _ZH_UNIT or ch in _ZH_BIG for ch in s):
+        return ''.join(str(_ZH_DIGIT[ch]) for ch in s)   # 二〇二六 -> 2026
+    total = section = num = 0
+    for ch in s:
+        if ch in _ZH_DIGIT:
+            num = _ZH_DIGIT[ch]
+        elif ch in _ZH_UNIT:
+            section += (num or 1) * _ZH_UNIT[ch]
+            num = 0
+        else:
+            total += (section + num) * _ZH_BIG[ch]
+            section = num = 0
+    return str(total + section + num)
+
+
+def _zh_digits(text: str) -> str:
+    def repl(m):
+        whole, _, frac = m.group(0).replace('点', '點').partition('點')
+        return _zh_int(whole) + ('.' + ''.join(str(_ZH_DIGIT[ch]) for ch in frac) if frac else '')
+    return _ZH_NUM_RE.sub(repl, text)
 
 
 def _load_lexicon() -> dict:
@@ -196,8 +232,10 @@ def _compare_form(text: str, lang: str) -> str:
             pass
     text = unicodedata.normalize('NFKC', text)
     text = _percent_words(_CURRENCY_RE.sub(' ', text), lang)
+    if lang.startswith('zh'):
+        text = _zh_digits(text)
     # num2words không có tiếng Philippines; người Philippines đọc số bằng tiếng Anh ("Box three")
-    text = spell_numbers(text, 'en' if lang.startswith('fil') else lang).casefold()
+    text = spell_numbers(text, 'en' if lang.startswith('fil') else lang, loose=True).casefold()
     # Bỏ dấu phụ (ş/ș, harakat Ả Rập...) và mọi thứ không phải chữ/số: Whisper ghi dấu câu, dấu
     # thanh, khoảng trắng theo kiểu riêng, không phải lỗi đọc
     text = unicodedata.normalize('NFKD', text)
