@@ -1453,7 +1453,7 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
         try:
             res = prefetch(store, jobs, parallel=parallel, log=log, feed=feed, order=todo,
                            native=native, slots=slots,
-                           fit_ratio=float(cfg.get('tts_fit_ratio', 1.2) or 0),
+                           fit_ratio=float(cfg.get('tts_fit_ratio', 1.3) or 0),
                            on_ready=lambda code: job.ready[code].set(),
                            qc_min=float(cfg.get('tts_qc_min', 0.75) or 0),
                            qc_retries=int(cfg.get('tts_qc_retries', 2)),
