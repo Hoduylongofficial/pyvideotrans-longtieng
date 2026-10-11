@@ -8,6 +8,10 @@
 #     thì không clone repo nữa (repo này ~500 MB), cài requirements.txt rồi chạy worker.py
 set -eo pipefail
 RAW="https://raw.githubusercontent.com/Hoduylongofficial/pyvideotrans-longtieng/${OMNIVOICE_REF:-main}"
+LOG=/var/log/portal/omnivoice.log
+mkdir -p /var/log/portal
+# Cài lỗi: ghi vào log mà worker.py đang đọc -> vast.ai bỏ máy này, thuê máy khác (không treo ở "đang bật")
+trap 'echo "OMNIVOICE_FATAL provision.sh lỗi ở dòng $LINENO" >> "$LOG"' ERR
 
 . /venv/main/bin/activate
 apt-get update -qq && apt-get install -y -qq ffmpeg > /dev/null || echo "OmniVoice: không cài được ffmpeg (bỏ qua)"
@@ -21,7 +25,7 @@ fi
 pip install -q omnivoice==0.2.0 huggingface_hub soundfile aiohttp
 python -c "from huggingface_hub import snapshot_download as d; d('k2-fsa/OmniVoice', local_dir='/models/OmniVoice')"
 
-mkdir -p /opt/omnivoice /workspace/vast-pyworker /var/log/portal
+mkdir -p /opt/omnivoice /workspace/vast-pyworker
 curl -fsSL "$RAW/runpod_tts/handler.py" -o /opt/omnivoice/handler.py
 curl -fsSL "$RAW/vast_tts/model_server.py" -o /opt/omnivoice/model_server.py
 curl -fsSL "$RAW/vast_tts/worker.py" -o /workspace/vast-pyworker/worker.py
