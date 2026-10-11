@@ -146,13 +146,14 @@ def _store_dir():
 
 
 # ---------------------------------------------------------------------------
-# Dự phòng RunPod: Modal chạm hạn mức tháng (usage/spend limit tự đặt) thì Modal dừng app, mọi lượt đọc
-# lỗi. Có runpod_endpoint_id + runpod_api_key trong params.json thì lượt đó (và các lượt sau, ở mọi tiến
-# trình cli) chuyển sang cùng model OmniVoice chạy trên RunPod (runpod_tts/handler.py) đến hết tháng.
+# GPU dự phòng: Modal chạm hạn mức tháng (usage/spend limit tự đặt) thì Modal dừng app, mọi lượt đọc lỗi.
+# Lượt đó (và các lượt sau, ở mọi tiến trình cli) chuyển sang cùng model OmniVoice trên GPU dự phòng đến hết
+# tháng, theo thứ tự: vast.ai Serverless (rẻ nhất; vast_endpoint + vast_endpoint_key) -> RunPod
+# (runpod_endpoint_id + runpod_api_key). vast.ai chưa có máy sẵn / lỗi thì lượt đó đi RunPod.
 RUNPOD_API = 'https://api.runpod.ai/v2/'
 RUNPOD_BATCH = 16       # câu / job RunPod: kết quả 16 câu FLAC ~3 MB, dưới giới hạn kích thước của RunPod
 MODAL_PAUSE_FILE = Path(ROOT_DIR) / 'tmp' / 'modal_tam_dung.json'
-MODAL_RETRY_MINUTES = 30   # Modal lỗi không rõ lý do (mất mạng, sự cố): dùng RunPod 30 phút rồi thử lại Modal
+MODAL_RETRY_MINUTES = 30   # Modal lỗi không rõ lý do (mất mạng, sự cố): dùng dự phòng 30 phút rồi thử lại Modal
 _LIMIT_WORDS = ('limit', 'billing', 'spend', 'budget', 'quota', 'credit', 'payment', 'stopped', 'disabled')
 
 
@@ -175,7 +176,7 @@ def _next_month_utc() -> float:
 
 
 def modal_paused() -> str:
-    """Lý do Modal đang tạm nghỉ (đang dùng RunPod); '' = dùng Modal bình thường"""
+    """Lý do Modal đang tạm nghỉ (đang dùng GPU dự phòng); '' = dùng Modal bình thường"""
     import json
     try:
         d = json.loads(MODAL_PAUSE_FILE.read_text(encoding='utf-8'))
@@ -193,7 +194,8 @@ def _pause_modal(reason: str, limit: bool) -> None:
                                     encoding='utf-8')
     except OSError:
         pass
-    msg = (f'OmniVoice: GPU Modal không dùng được ({reason[:200]}) -> chuyển sang GPU RunPod'
+    names = ' / '.join(n for n, ok in (('vast.ai', vast_configured()), ('RunPod', runpod_configured())) if ok)
+    msg = (f'OmniVoice: GPU Modal không dùng được ({reason[:200]}) -> chuyển sang GPU {names}'
            + (' đến hết tháng' if limit else f' {MODAL_RETRY_MINUTES} phút'))
     logger.warning(msg)
     print(msg, flush=True)
@@ -289,17 +291,153 @@ def _post_runpod(body: dict, timeout: float = 1800) -> dict:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# vast.ai Serverless (vast_tts/): hỏi run.vast.ai/route xin 1 máy đang sẵn sàng, rồi gửi thẳng tới máy đó
+# {"auth_data": <trả lời của route>, "payload": <body /tts>} qua HTTPS (chứng chỉ do vast.ai ký). Khoá là key
+# riêng của endpoint (không phải key cả tài khoản). Endpoint về 0 máy khi rảnh: lượt đầu phải chờ vast.ai bật
+# máy (máy mới ~5-10 phút cài đặt, máy "lạnh" ~1 phút); trong lúc chờ, lượt đó đi RunPod.
+VAST_ROUTE = 'https://run.vast.ai/route/'
+VAST_CERT_URL = 'https://console.vast.ai/static/jvastai_root.cer'
+VAST_CERT_FILE = Path(ROOT_DIR) / 'tmp' / 'vast_root.cer'
+VAST_BATCH = 16
+VAST_WAIT = 180            # giây chờ vast.ai có máy cho 1 lượt, quá thì lượt đó đi RunPod
+VAST_WAIT_COLD = 15        # vừa có lượt chờ hụt: các lượt sau chỉ chờ ngắn (vast.ai vẫn đang bật máy)
+_vast = {'session': None, 'cold_until': 0.0, 'lock': threading.Lock()}
+
+
+class VastNotReady(RuntimeError):
+    pass
+
+
+def vast_configured() -> bool:
+    return bool(str(params.get('vast_endpoint', '')).strip() and str(params.get('vast_endpoint_key', '')).strip())
+
+
+def _vast_http():
+    """requests.Session tin chứng chỉ gốc của vast.ai (máy worker dùng chứng chỉ do vast.ai ký)"""
+    import ssl
+    from requests.adapters import HTTPAdapter
+    with _vast['lock']:
+        if _vast['session'] is not None:
+            return _vast['session']
+        if not VAST_CERT_FILE.is_file():
+            r = requests.get(VAST_CERT_URL, timeout=60)
+            r.raise_for_status()
+            VAST_CERT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VAST_CERT_FILE.write_bytes(r.content)
+        ctx = ssl.create_default_context(cafile=str(VAST_CERT_FILE))
+        # Chứng chỉ gốc vast.ai thiếu keyCertSign; OpenSSL 3 chế độ strict từ chối (SDK của vast.ai cũng tắt cờ này)
+        ctx.verify_flags &= ~getattr(ssl, 'VERIFY_X509_STRICT', 0)
+
+        class _Adapter(HTTPAdapter):
+            def init_poolmanager(self, *a, **kw):
+                kw['ssl_context'] = ctx
+                return super().init_poolmanager(*a, **kw)
+
+        s = requests.Session()
+        s.mount('https://', _Adapter(pool_maxsize=16))
+        _vast['session'] = s
+        return s
+
+
+def _vast_route(cost: float, wait: float) -> dict:
+    """Xin vast.ai 1 máy cho lượt có cost câu; trả về auth_data (có url máy). Hết wait giây -> VastNotReady"""
+    name, key = str(params['vast_endpoint']).strip(), str(params['vast_endpoint_key']).strip()
+    deadline, idx, delay = time.time() + wait, 0, 1.0
+    while True:
+        r = requests.post(VAST_ROUTE, params={'api_key': key}, headers={'Authorization': f'Bearer {key}'},
+                          json={'endpoint': name, 'api_key': key, 'cost': cost, 'request_idx': idx,
+                                'replay_timeout': 60}, timeout=30)
+        if r.status_code in (401, 403):
+            raise PermissionError('OmniVoice vast.ai: sai tên endpoint / key (vast_endpoint, vast_endpoint_key). '
+                                  'Nhập lại bằng DOI_TTS.bat mục 7.')
+        r.raise_for_status()
+        d = r.json()
+        if d.get('url'):
+            return d
+        idx = d.get('request_idx') or idx
+        if time.time() + delay > deadline:
+            raise VastNotReady(f'vast.ai chưa có máy sẵn sàng ({d.get("status", "đang bật máy")})')
+        time.sleep(delay)
+        delay = min(delay * 2, 5)
+
+
+def _post_vast(body: dict) -> dict:
+    """Cùng body /tts của Modal -> cùng JSON trả về, chạy trên vast.ai Serverless. Chia 16 câu/lượt, các lượt
+    chạy song song (vast.ai chia cho nhiều máy). Máy bị thu hồi giữa chừng thì xin máy khác, gửi lại."""
+    items = body.get('items') or []
+    parts = [items[i:i + VAST_BATCH] for i in range(0, len(items), VAST_BATCH)] or [[]]
+    http = _vast_http()
+
+    def one(part):
+        try:
+            return on_vast(part)
+        except PermissionError:
+            raise
+        except Exception as e:  # noqa: BLE001 - phần này đi RunPod, phần khác vẫn giữ kết quả vast.ai
+            if not runpod_configured():
+                raise
+            logger.warning(f'OmniVoice vast.ai: {e} -> {len(part)} câu này dùng RunPod')
+            return _post_runpod(dict(body, items=part))
+
+    def on_vast(part):
+        wait = VAST_WAIT_COLD if time.time() < _vast['cold_until'] else VAST_WAIT
+        last = None
+        for _ in range(3):
+            try:
+                auth = _vast_route(max(1, len(part)), wait)
+            except VastNotReady:
+                _vast['cold_until'] = time.time() + 120
+                raise
+            try:
+                r = http.post(auth['url'].rstrip('/') + '/tts', timeout=900,
+                              json={'auth_data': auth, 'session_id': None, 'payload': dict(body, items=part)})
+            except requests.RequestException as e:   # máy biến mất / mạng của máy chập chờn
+                last = e
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last = RuntimeError(f'HTTP {r.status_code} {r.text[:200]}')
+                continue
+            r.raise_for_status()
+            out = r.json()
+            if 'audios' not in out:
+                raise RuntimeError(f'vast.ai trả về lỗi: {str(out)[:200]}')
+            _vast['cold_until'] = 0.0
+            return out
+        raise RuntimeError(f'vast.ai lỗi 3 lần: {last}')
+
+    with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+        results = list(pool.map(one, parts))
+    merged = {'audios': [a for r in results for a in r['audios']],
+              'seconds': round(sum(r.get('seconds', 0) for r in results), 2), 'provider': 'vast'}
+    if any('heard' in r for r in results):
+        merged['heard'] = [h for r, p in zip(results, parts) for h in r.get('heard', [''] * len(p))]
+    return merged
+
+
 def _post(url: str, key: str, body: dict, attempts: int = 3) -> dict:
-    """Gửi lượt đọc lên GPU Modal; Modal hết hạn mức / không phản hồi thì sang RunPod (nếu đã cài)."""
-    backup = runpod_configured()
-    if not (backup and modal_paused()):
+    """Gửi lượt đọc lên GPU Modal; Modal hết hạn mức / không phản hồi thì sang GPU dự phòng đã cài
+    (vast.ai rồi RunPod)."""
+    backups = [(name, fn) for name, ok, fn in (('vast.ai', vast_configured(), _post_vast),
+                                               ('RunPod', runpod_configured(), _post_runpod)) if ok]
+    if not (backups and modal_paused()):
         try:
             return _post_modal(url, key, body, attempts)
         except ModalUnavailable as e:
-            if not backup:
+            if not backups:
                 raise RuntimeError(f'OmniVoice Modal {e}') from e
             _pause_modal(str(e), e.limit)
-    return _post_runpod(body)
+    last = None
+    for n, (name, fn) in enumerate(backups):
+        try:
+            return fn(body)
+        except PermissionError:
+            raise
+        except Exception as e:  # noqa: BLE001 - GPU dự phòng này hỏng / chưa sẵn sàng: thử cái sau
+            last = e
+            if n + 1 < len(backups):
+                logger.warning(f'OmniVoice {name}: {e} -> lượt này dùng {backups[n + 1][0]}')
+    raise RuntimeError(f'OmniVoice: GPU dự phòng không chạy được: {last}')
 
 
 def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None) -> tuple:
