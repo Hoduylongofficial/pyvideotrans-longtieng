@@ -263,21 +263,41 @@ def use_runpod() -> None:
     print('   ĐÃ LƯU RunPod dự phòng.')
 
 
+def vast_endpoint_key(name: str, account_key: str) -> str:
+    """Key là API key tài khoản -> trả về key riêng của endpoint `name`; key endpoint sẵn -> ''"""
+    import requests
+    try:
+        r = requests.get('https://console.vast.ai/api/v0/endptjobs/', params={'client_id': 'me'}, timeout=60,
+                         headers={'Authorization': f'Bearer {account_key}'})
+        if r.status_code != 200:
+            return ''
+        for e in r.json().get('results', []):
+            if e.get('endpoint_name') == name and e.get('api_key'):
+                print(f'   Đã lấy key riêng của endpoint {name} (key tài khoản không lưu).')
+                return e['api_key']
+        print(f'   Không thấy endpoint "{name}" trong tài khoản này.')
+    except Exception as e:  # noqa: BLE001
+        print(f'   Không hỏi được vast.ai: {e}')
+    return ''
+
+
 def use_vast() -> None:
     name, key = vast()
     print('\n   GPU vast.ai dự phòng: cùng giọng OmniVoice, rẻ hơn RunPod ~3 lần. Khi Modal hết hạn mức tháng')
     print('   thì dùng vast.ai trước; vast.ai chưa có máy sẵn (lần đầu bật mất 5-10 phút) thì lượt đó dùng RunPod.')
     print('   Tên endpoint + key của endpoint lấy từ người quản trị (cloud.vast.ai > Serverless).')
+    print('   Máy quản trị: dán API key tài khoản vast.ai (cloud.vast.ai > Keys) — máy tự lấy key riêng của')
+    print('   endpoint rồi chỉ lưu key đó (key tài khoản không được lưu, gửi nhân viên key endpoint).')
     ans = ask(f'   Tên endpoint [Enter = {name or "chưa có"}]: ').strip().strip('"')
     if ans:
         name = ans
-    ans = ask(f'   Key endpoint [Enter = {mask(key) if key else "chưa có"}, gõ - để bỏ vast.ai]: ').strip().strip('"')
+    ans = ask(f'   Key [Enter = {mask(key) if key else "chưa có"}, gõ - để bỏ vast.ai]: ').strip().strip('"')
     if ans == '-':
         save_params(vast_endpoint='', vast_endpoint_key='')
         print('   Đã bỏ vast.ai dự phòng.')
         return
     if ans:
-        key = ans
+        key = vast_endpoint_key(name, ans) or ans
     if not name or not key:
         print('   Thiếu tên endpoint hoặc key, huỷ.')
         return
