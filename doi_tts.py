@@ -7,9 +7,11 @@
   3) Giọng mẫu : nhái từng câu từ video gốc, hoặc 1 file giọng mẫu cố định
   4) Đọc thử + ước tính thời gian / chi phí
   5) (Máy quản trị) deploy / cập nhật server trên Modal, tạo key
+  6) GPU RunPod dự phòng: Modal hết hạn mức tháng thì tự chuyển sang RunPod (endpoint ID + API key)
 
 Ghi vào dub_all.config.json: "tts_type"; videotrans/params.json: omnivoice_modal_url,
-omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text (params.json không lên GitHub).
+omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text, runpod_endpoint_id, runpod_api_key
+(params.json không lên GitHub).
 """
 import base64
 import io
@@ -54,6 +56,11 @@ def remote() -> tuple:
     return str(p.get('omnivoice_modal_url', '') or '').strip(), str(p.get('omnivoice_modal_key', '') or '').strip()
 
 
+def runpod() -> tuple:
+    p = params()
+    return str(p.get('runpod_endpoint_id', '') or '').strip(), str(p.get('runpod_api_key', '') or '').strip()
+
+
 # ---------------------------------------------------------------------------
 def show_status() -> None:
     t = int(dub_cfg().get('tts_type', EDGE_TTS))
@@ -61,6 +68,8 @@ def show_status() -> None:
     p = params()
     print(f'   Giọng đọc đang dùng : {TTS_NAMES.get(t, f"tts_type={t}")}')
     print(f'   Server GPU Modal    : {url or "(chưa nhập)"}' + (f'  · key {mask(key)}' if key else ''))
+    rp_id, rp_key = runpod()
+    print(f'   GPU RunPod dự phòng : {rp_id or "(chưa nhập)"}' + (f'  · key {mask(rp_key)}' if rp_key else ''))
     ref = str(p.get('omnivoice_ref_wav', '') or '')
     print(f'   Giọng mẫu OmniVoice : {"file cố định " + ref if ref else "nhái từng câu từ video gốc"}')
 
@@ -201,6 +210,51 @@ def trial() -> None:
     print(f'   Nghe thử: {out_dir}')
 
 
+def check_runpod(endpoint: str, key: str) -> bool:
+    import requests
+    print('   Kiểm tra endpoint RunPod...')
+    try:
+        r = requests.get(f'https://api.runpod.ai/v2/{endpoint}/health', timeout=60,
+                         headers={'Authorization': f'Bearer {key}'})
+    except Exception as e:  # noqa: BLE001
+        print(f'   Không kết nối được: {e}')
+        return False
+    if r.status_code == 401:
+        print('   SAI API KEY.')
+        return False
+    if r.status_code != 200:
+        print(f'   Không thấy endpoint (HTTP {r.status_code}). Kiểm tra lại endpoint ID.')
+        return False
+    w = r.json().get('workers', {})
+    print(f'   Kết nối OK (máy GPU đang bật: {w.get("ready", 0) + w.get("running", 0)}, '
+          f'máy chỉ bật khi Modal hết hạn mức).')
+    return True
+
+
+def use_runpod() -> None:
+    endpoint, key = runpod()
+    print('\n   GPU RunPod dự phòng: cùng giọng OmniVoice, chỉ dùng khi GPU Modal hết hạn mức tháng')
+    print('   (hoặc Modal không phản hồi). Sang tháng mới tự quay lại Modal.')
+    print('   Endpoint ID + API key lấy từ người quản trị (console.runpod.io > Serverless).')
+    ans = ask(f'   Endpoint ID [Enter = {endpoint or "chưa có"}]: ').strip().strip('"')
+    if ans:
+        endpoint = ans.rstrip('/').split('/')[-1]
+    ans = ask(f'   API key [Enter = {mask(key) if key else "chưa có"}, gõ - để bỏ RunPod]: ').strip().strip('"')
+    if ans == '-':
+        save_params(runpod_endpoint_id='', runpod_api_key='')
+        print('   Đã bỏ RunPod dự phòng.')
+        return
+    if ans:
+        key = ans
+    if not endpoint or not key:
+        print('   Thiếu endpoint ID hoặc API key, huỷ.')
+        return
+    if not check_runpod(endpoint, key) and not ask_yes('   Vẫn lưu?', default=False):
+        return
+    save_params(runpod_endpoint_id=endpoint, runpod_api_key=key)
+    print('   ĐÃ LƯU RunPod dự phòng.')
+
+
 # ---------------------------------------------------------------------------
 def _modal(*args, capture=False):
     cmd = ['uvx', '--from', 'modal', 'modal', *args]
@@ -262,11 +316,13 @@ def main() -> int:
         print('   4) Đọc thử OmniVoice + ước tính thời gian, chi phí')
         print('   ' + '-' * 40)
         print('   5) [Máy quản trị] Deploy / cập nhật server trên Modal, tạo key')
+        print('   6) GPU RunPod dự phòng khi Modal hết hạn mức (nhập endpoint ID + API key)')
         print('   0) Thoát')
         choice = ask('\n   Nhập số rồi Enter: ')
         if choice in ('0', 'q'):
             return 0
-        actions = {'1': use_edge, '2': use_omnivoice, '3': choose_ref, '4': trial, '5': admin_deploy}
+        actions = {'1': use_edge, '2': use_omnivoice, '3': choose_ref, '4': trial, '5': admin_deploy,
+                   '6': use_runpod}
         if choice in actions:
             actions[choice]()
             pause()

@@ -145,7 +145,61 @@ def _store_dir():
     return Path(d) if d else None
 
 
-def _post(url: str, key: str, body: dict, attempts: int = 3) -> dict:
+# ---------------------------------------------------------------------------
+# Dự phòng RunPod: Modal chạm hạn mức tháng (usage/spend limit tự đặt) thì Modal dừng app, mọi lượt đọc
+# lỗi. Có runpod_endpoint_id + runpod_api_key trong params.json thì lượt đó (và các lượt sau, ở mọi tiến
+# trình cli) chuyển sang cùng model OmniVoice chạy trên RunPod (runpod_tts/handler.py) đến hết tháng.
+RUNPOD_API = 'https://api.runpod.ai/v2/'
+RUNPOD_BATCH = 16       # câu / job RunPod: kết quả 16 câu FLAC ~3 MB, dưới giới hạn kích thước của RunPod
+MODAL_PAUSE_FILE = Path(ROOT_DIR) / 'tmp' / 'modal_tam_dung.json'
+MODAL_RETRY_MINUTES = 30   # Modal lỗi không rõ lý do (mất mạng, sự cố): dùng RunPod 30 phút rồi thử lại Modal
+_LIMIT_WORDS = ('limit', 'billing', 'spend', 'budget', 'quota', 'credit', 'payment', 'stopped', 'disabled')
+
+
+class ModalUnavailable(RuntimeError):
+    def __init__(self, msg: str, limit: bool):
+        super().__init__(msg)
+        self.limit = limit   # True = hết hạn mức / app bị dừng, không phải lỗi mạng thoáng qua
+
+
+def runpod_configured() -> bool:
+    return bool(str(params.get('runpod_endpoint_id', '')).strip() and str(params.get('runpod_api_key', '')).strip())
+
+
+def _next_month_utc() -> float:
+    """Chu kỳ tính tiền Modal theo tháng dương lịch (Oct 1 – Oct 31)"""
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    first = dt.datetime(now.year + (now.month == 12), now.month % 12 + 1, 1, tzinfo=dt.timezone.utc)
+    return first.timestamp()
+
+
+def modal_paused() -> str:
+    """Lý do Modal đang tạm nghỉ (đang dùng RunPod); '' = dùng Modal bình thường"""
+    import json
+    try:
+        d = json.loads(MODAL_PAUSE_FILE.read_text(encoding='utf-8'))
+        return str(d.get('reason') or 'Modal tạm nghỉ') if time.time() < float(d['until']) else ''
+    except (OSError, ValueError, KeyError, TypeError):
+        return ''
+
+
+def _pause_modal(reason: str, limit: bool) -> None:
+    import json
+    until = _next_month_utc() if limit else time.time() + MODAL_RETRY_MINUTES * 60
+    try:
+        MODAL_PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MODAL_PAUSE_FILE.write_text(json.dumps({'until': until, 'reason': reason[:300]}, ensure_ascii=False),
+                                    encoding='utf-8')
+    except OSError:
+        pass
+    msg = (f'OmniVoice: GPU Modal không dùng được ({reason[:200]}) -> chuyển sang GPU RunPod'
+           + (' đến hết tháng' if limit else f' {MODAL_RETRY_MINUTES} phút'))
+    logger.warning(msg)
+    print(msg, flush=True)
+
+
+def _post_modal(url: str, key: str, body: dict, attempts: int = 3) -> dict:
     last = None
     for n in range(attempts):
         try:
@@ -155,15 +209,97 @@ def _post(url: str, key: str, body: dict, attempts: int = 3) -> dict:
                               headers={'Authorization': f'Bearer {key}'})
             if r.status_code == 401:
                 raise PermissionError('OmniVoice Modal: sai key (omnivoice_modal_key). Nhập lại bằng DOI_TTS.bat mục 2.')
+            if r.status_code in (402, 403, 404, 429) or (
+                    r.status_code >= 400 and any(w in r.text[:2000].lower() for w in _LIMIT_WORDS)):
+                # Hết hạn mức / app bị dừng: thử lại cũng vô ích
+                raise ModalUnavailable(f'HTTP {r.status_code} {r.text[:200].strip()}', limit=True)
             r.raise_for_status()
             return r.json()
-        except PermissionError:
+        except (PermissionError, ModalUnavailable):
             raise
         except Exception as e:  # noqa: BLE001 - mạng chập chờn / GPU đang khởi động: thử lại
             last = e
             logger.warning(f'OmniVoice Modal lỗi lần {n + 1}/{attempts}: {e}')
             time.sleep(5 * (n + 1))
-    raise RuntimeError(f'OmniVoice Modal không phản hồi: {last}')
+    raise ModalUnavailable(f'không phản hồi: {last}', limit=False)
+
+
+def _post_runpod(body: dict, timeout: float = 1800) -> dict:
+    """Cùng body /tts của Modal -> cùng JSON trả về, chạy trên endpoint queue của RunPod. Chia 16 câu/job
+    (giới hạn kích thước kết quả), các job chạy song song trên nhiều GPU RunPod."""
+    endpoint = str(params['runpod_endpoint_id']).strip()
+    headers = {'Authorization': f'Bearer {str(params["runpod_api_key"]).strip()}'}
+    base = RUNPOD_API + endpoint
+    items = body.get('items') or []
+    parts = [items[i:i + RUNPOD_BATCH] for i in range(0, len(items), RUNPOD_BATCH)] or [[]]
+    deadline = time.time() + timeout
+
+    def submit(part):
+        for n in range(3):
+            try:
+                r = requests.post(base + '/run', headers=headers, timeout=60,
+                                  json={'input': dict(body, items=part, op='tts'),
+                                        'policy': {'executionTimeout': 900_000, 'ttl': 3_600_000}})
+                if r.status_code == 401:
+                    raise PermissionError('OmniVoice RunPod: sai API key (runpod_api_key). Nhập lại bằng DOI_TTS.bat mục 6.')
+                r.raise_for_status()
+                return r.json()['id']
+            except PermissionError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f'OmniVoice RunPod gửi job lỗi lần {n + 1}/3: {e}')
+                time.sleep(5 * (n + 1))
+        raise RuntimeError('OmniVoice RunPod không nhận job')
+
+    jobs = {i: submit(p) for i, p in enumerate(parts)}
+    retries = {i: 0 for i in jobs}
+    results = {}
+    while len(results) < len(parts):
+        if time.time() > deadline:
+            for jid in jobs.values():
+                try:
+                    requests.post(f'{base}/cancel/{jid}', headers=headers, timeout=30)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise RuntimeError('OmniVoice RunPod: quá thời gian chờ')
+        time.sleep(2)
+        for i, jid in list(jobs.items()):
+            if i in results:
+                continue
+            try:
+                d = requests.get(f'{base}/status/{jid}', headers=headers, timeout=60).json()
+            except Exception as e:  # noqa: BLE001 - mạng chập chờn: hỏi lại vòng sau
+                logger.warning(f'OmniVoice RunPod hỏi trạng thái lỗi: {e}')
+                continue
+            status = d.get('status')
+            out = d.get('output')
+            if status == 'COMPLETED' and isinstance(out, dict) and 'audios' in out:
+                results[i] = out
+            elif status in ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'):
+                err = (out or {}).get('error') if isinstance(out, dict) else d.get('error')
+                if retries[i] >= 2:
+                    raise RuntimeError(f'OmniVoice RunPod job lỗi: {status} {err or d.get("error")}')
+                retries[i] += 1
+                logger.warning(f'OmniVoice RunPod job {status} ({err or d.get("error")}), gửi lại')
+                jobs[i] = submit(parts[i])
+    merged = {'audios': [a for i in range(len(parts)) for a in results[i]['audios']],
+              'seconds': round(sum(results[i].get('seconds', 0) for i in results), 2), 'provider': 'runpod'}
+    if any('heard' in r for r in results.values()):
+        merged['heard'] = [h for i in range(len(parts)) for h in results[i].get('heard', [''] * len(parts[i]))]
+    return merged
+
+
+def _post(url: str, key: str, body: dict, attempts: int = 3) -> dict:
+    """Gửi lượt đọc lên GPU Modal; Modal hết hạn mức / không phản hồi thì sang RunPod (nếu đã cài)."""
+    backup = runpod_configured()
+    if not (backup and modal_paused()):
+        try:
+            return _post_modal(url, key, body, attempts)
+        except ModalUnavailable as e:
+            if not backup:
+                raise RuntimeError(f'OmniVoice Modal {e}') from e
+            _pause_modal(str(e), e.limit)
+    return _post_runpod(body)
 
 
 def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None) -> tuple:
