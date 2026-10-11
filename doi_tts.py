@@ -8,11 +8,10 @@
   4) Đọc thử + ước tính thời gian / chi phí
   5) (Máy quản trị) deploy / cập nhật server trên Modal, tạo key
   6) GPU RunPod dự phòng: Modal hết hạn mức tháng thì tự chuyển sang RunPod (endpoint ID + API key)
-  7) GPU vast.ai dự phòng (rẻ hơn RunPod, dùng trước RunPod): tên endpoint + key của endpoint
 
 Ghi vào dub_all.config.json: "tts_type"; videotrans/params.json: omnivoice_modal_url,
-omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text, runpod_endpoint_id, runpod_api_key,
-vast_endpoint, vast_endpoint_key (params.json không lên GitHub).
+omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text, runpod_endpoint_id, runpod_api_key
+(params.json không lên GitHub).
 """
 import base64
 import io
@@ -62,11 +61,6 @@ def runpod() -> tuple:
     return str(p.get('runpod_endpoint_id', '') or '').strip(), str(p.get('runpod_api_key', '') or '').strip()
 
 
-def vast() -> tuple:
-    p = params()
-    return str(p.get('vast_endpoint', '') or '').strip(), str(p.get('vast_endpoint_key', '') or '').strip()
-
-
 # ---------------------------------------------------------------------------
 def show_status() -> None:
     t = int(dub_cfg().get('tts_type', EDGE_TTS))
@@ -76,8 +70,6 @@ def show_status() -> None:
     print(f'   Server GPU Modal    : {url or "(chưa nhập)"}' + (f'  · key {mask(key)}' if key else ''))
     rp_id, rp_key = runpod()
     print(f'   GPU RunPod dự phòng : {rp_id or "(chưa nhập)"}' + (f'  · key {mask(rp_key)}' if rp_key else ''))
-    v_name, v_key = vast()
-    print(f'   GPU vast.ai dự phòng: {v_name or "(chưa nhập)"}' + (f'  · key {mask(v_key)}' if v_key else ''))
     ref = str(p.get('omnivoice_ref_wav', '') or '')
     print(f'   Giọng mẫu OmniVoice : {"file cố định " + ref if ref else "nhái từng câu từ video gốc"}')
 
@@ -263,48 +255,6 @@ def use_runpod() -> None:
     print('   ĐÃ LƯU RunPod dự phòng.')
 
 
-def vast_endpoint_key(name: str, account_key: str) -> str:
-    """Key là API key tài khoản -> trả về key riêng của endpoint `name`; key endpoint sẵn -> ''"""
-    import requests
-    try:
-        r = requests.get('https://console.vast.ai/api/v0/endptjobs/', params={'client_id': 'me'}, timeout=60,
-                         headers={'Authorization': f'Bearer {account_key}'})
-        if r.status_code != 200:
-            return ''
-        for e in r.json().get('results', []):
-            if e.get('endpoint_name') == name and e.get('api_key'):
-                print(f'   Đã lấy key riêng của endpoint {name} (key tài khoản không lưu).')
-                return e['api_key']
-        print(f'   Không thấy endpoint "{name}" trong tài khoản này.')
-    except Exception as e:  # noqa: BLE001
-        print(f'   Không hỏi được vast.ai: {e}')
-    return ''
-
-
-def use_vast() -> None:
-    name, key = vast()
-    print('\n   GPU vast.ai dự phòng: cùng giọng OmniVoice, rẻ hơn RunPod ~3 lần. Khi Modal hết hạn mức tháng')
-    print('   thì dùng vast.ai trước; vast.ai chưa có máy sẵn (lần đầu bật mất 5-10 phút) thì lượt đó dùng RunPod.')
-    print('   Tên endpoint + key của endpoint lấy từ người quản trị (cloud.vast.ai > Serverless).')
-    print('   Máy quản trị: dán API key tài khoản vast.ai (cloud.vast.ai > Keys) — máy tự lấy key riêng của')
-    print('   endpoint rồi chỉ lưu key đó (key tài khoản không được lưu, gửi nhân viên key endpoint).')
-    ans = ask(f'   Tên endpoint [Enter = {name or "chưa có"}]: ').strip().strip('"')
-    if ans:
-        name = ans
-    ans = ask(f'   Key [Enter = {mask(key) if key else "chưa có"}, gõ - để bỏ vast.ai]: ').strip().strip('"')
-    if ans == '-':
-        save_params(vast_endpoint='', vast_endpoint_key='')
-        print('   Đã bỏ vast.ai dự phòng.')
-        return
-    if ans:
-        key = vast_endpoint_key(name, ans) or ans
-    if not name or not key:
-        print('   Thiếu tên endpoint hoặc key, huỷ.')
-        return
-    save_params(vast_endpoint=name, vast_endpoint_key=key)
-    print('   ĐÃ LƯU vast.ai dự phòng.')
-
-
 # ---------------------------------------------------------------------------
 def _modal(*args, capture=False):
     cmd = ['uvx', '--from', 'modal', 'modal', *args]
@@ -367,13 +317,12 @@ def main() -> int:
         print('   ' + '-' * 40)
         print('   5) [Máy quản trị] Deploy / cập nhật server trên Modal, tạo key')
         print('   6) GPU RunPod dự phòng khi Modal hết hạn mức (nhập endpoint ID + API key)')
-        print('   7) GPU vast.ai dự phòng, rẻ hơn RunPod (nhập tên endpoint + key)')
         print('   0) Thoát')
         choice = ask('\n   Nhập số rồi Enter: ')
         if choice in ('0', 'q'):
             return 0
         actions = {'1': use_edge, '2': use_omnivoice, '3': choose_ref, '4': trial, '5': admin_deploy,
-                   '6': use_runpod, '7': use_vast}
+                   '6': use_runpod}
         if choice in actions:
             actions[choice]()
             pause()

@@ -10,21 +10,20 @@ rồi hỏi /status/<job> đến khi xong; "output" giống hệt JSON mà /tts 
 Khoá = API key RunPod (header Authorization), không cần key riêng như Modal.
 
 Build: RunPod tự build runpod_tts/Dockerfile từ GitHub mỗi khi tạo Release mới.
-vast.ai Serverless dùng lại file này qua vast_tts/model_server.py (import rồi gọi handler()).
 """
 import base64
 import hashlib
 import io
-import os
 import threading
 import time
 
 import numpy as np
+import runpod
 import soundfile as sf
 import torch
 from omnivoice import OmniVoice
 
-MODEL_DIR = os.environ.get('OMNIVOICE_MODEL_DIR', '/models/OmniVoice')
+MODEL_DIR = '/models/OmniVoice'
 BATCH = 16            # số câu đọc cùng lúc trên GPU
 LANG_ALIASES = {'ar': 'arb'}
 WHISPER_LANG = {'fil': 'tl', 'zh-tw': 'zh', 'zh-cn': 'zh'}
@@ -147,5 +146,4 @@ def handler(job):
 
 
 if __name__ == '__main__':
-    import runpod
     runpod.serverless.start({'handler': handler})
