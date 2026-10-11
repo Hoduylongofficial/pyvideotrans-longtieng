@@ -5,6 +5,9 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 HF_HOME=/models/hf PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# PyTorch bản CUDA 12.8 (bản mặc định trên PyPI cần CUDA 13, ít máy RunPod có): endpoint đặt
+# "Allowed CUDA versions" từ 12.8 trở lên
+RUN pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 RUN pip install omnivoice==0.2.0 runpod==1.7.9 huggingface_hub soundfile
 
 # Model nằm sẵn trong image: máy bật lên là đọc được, không tải lại mỗi lần
