@@ -626,26 +626,31 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         """Chạy ở luồng riêng: AI viết ngắn lại câu quá dài (dub_all sửa phụ đề + chữ để đọc). Không chiếm
         luồng gửi GPU: lúc chờ AI (20-60s) GPU vẫn đọc ngôn ngữ khác, container không bị rảnh / tắt rồi khởi
         động lại (tốn tiền). Xong thì đưa câu mới vào hàng đợi GPU."""
+        # Lỗi gì ở đây cũng phải ready(lang): không thì ngôn ngữ này kẹt ở 'ask', luồng GPU không bao giờ
+        # thoát, dub_all chờ render ngôn ngữ đó mãi
         try:
             changed = shorten(lang, rows) or {}
+            new = [(old, speak_text(changed[sub], lang), window)
+                   for sub, old, window, _ in rows if sub in changed and str(changed[sub]).strip()]
         except Exception as e:  # noqa: BLE001 - không viết ngắn được thì render như cũ (tua nhanh)
             log(f'  [{lang}] không viết ngắn được câu đọc quá nhanh ({e})')
-            changed = {}
-        new = [(old, speak_text(changed[sub], lang), window)
-               for sub, old, window, _ in rows if sub in changed and changed[sub].strip()]
+            new = []
         with lock:
-            if not new:
-                left[lang] = 0
-                ready(lang)
-                return
-            swap = {old: ns for old, ns, _ in new}
-            jobs[lang] = [swap.get(t, t) for t in jobs[lang]]
-            for old, ns, window in new:
-                slots[lang].pop(old, None)
-                slots[lang][ns] = min(window, slots[lang].get(ns, window))
-                sub_of[lang][ns] = changed[sub_of[lang].get(old, old)]
-            result[lang][4] += len(new)
-            enqueue(lang, 'shorten', [list(dict.fromkeys(ns for _, ns, _ in new))], 0)
+            try:
+                if new:
+                    swap = {old: ns for old, ns, _ in new}
+                    jobs[lang] = [swap.get(t, t) for t in jobs[lang]]
+                    for old, ns, window in new:
+                        slots[lang].pop(old, None)
+                        slots[lang][ns] = min(window, slots[lang].get(ns, window))
+                        sub_of[lang][ns] = changed[sub_of[lang].get(old, old)]
+                    result[lang][4] += len(new)
+                    enqueue(lang, 'shorten', [list(dict.fromkeys(ns for _, ns, _ in new))], 0)
+                    return
+            except Exception as e:  # noqa: BLE001
+                log(f'  [{lang}] không đọc lại được câu viết ngắn ({e})')
+            left[lang] = 0
+            ready(lang)
 
     def read_short(lang, texts) -> None:
         """Đọc câu đã viết ngắn; câu mới vẫn dài hơn khung thì đọc lại theo khung luôn"""
@@ -669,26 +674,36 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         for c in chunks:
             tasks.put((priority, next(seq), kind, lang, c))
 
-    def finish_task(lang):
-        left[lang] -= 1
-        if left[lang] > 0:
-            return
+    def next_step(lang) -> bool:
+        """Đưa bước tiếp theo của ngôn ngữ vào hàng đợi; False = không còn gì, render được"""
         if phase[lang] in ('synth', 'redo'):
             redo = plan_redo(lang)
             if redo:
                 rounds[lang] += 1
                 enqueue(lang, 'redo', redo, 0)
-                return
+                return True
             fits = plan_fit(lang)
             if fits:
                 enqueue(lang, 'fit', fits, 0)
-                return
+                return True
         if phase[lang] in ('synth', 'redo', 'fit'):
             rows = plan_shorten(lang)
             if rows:
                 left[lang], phase[lang] = 1, 'ask'   # giữ luồng GPU chưa thoát trong lúc chờ AI
                 threading.Thread(target=ask_shorten, args=(lang, rows), daemon=True).start()
+                return True
+        return False
+
+    def finish_task(lang):
+        left[lang] -= 1
+        if left[lang] > 0:
+            return
+        try:
+            if next_step(lang):
                 return
+        except Exception as e:  # noqa: BLE001 - vd file giọng hỏng không đọc được: render với giọng đã có
+            log(f'  [{lang}] tạo sẵn giọng: lỗi khi kiểm tra câu ({e}) — render với giọng đã có')
+            left[lang] = 0
         ready(lang)
 
     def add(lang, texts, win, start=True):

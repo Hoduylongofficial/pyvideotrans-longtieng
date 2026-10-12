@@ -1030,9 +1030,18 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         if on_done:
             on_done(code, status)
 
+    def translate_safe(i: int, lang: dict, quiet: bool) -> tuple:
+        """1 ngôn ngữ lỗi bất ngờ (đọc SRT, soát dịch, ghi file...) chỉ hỏng ngôn ngữ đó: không thì cả luồng
+        dịch dừng, các ngôn ngữ dịch sau không được báo xong -> không tạo giọng trước, cuối lượt báo crash."""
+        try:
+            return translate_one(i, lang, quiet)
+        except Exception as e:  # noqa: BLE001
+            log(f'  [{i}/{total}] {lang["code"]:<6} {lang.get("name", "")} — LỖI không mong đợi: {e!r}')
+            return lang['code'], 'failed'
+
     if parallel == 1 or total <= 1:
         for i, lang in enumerate(targets, start=1):
-            finished(*translate_one(i, lang, quiet=False))
+            finished(*translate_safe(i, lang, quiet=False))
         log(f'  Dịch xong {total} ngôn ngữ sau {fmt_duration(time.time() - started)}')
         return results
 
@@ -1040,7 +1049,7 @@ def phase_translate(cfg: dict, langs: list, srt: Path, subs_dir: Path, log: Log,
         f'(sửa "translate_parallel" trong dub_all.config.json để đổi).')
     log('  Output chi tiết của từng ngôn ngữ nằm trong logs/translate-<mã>.log')
     with ThreadPoolExecutor(max_workers=parallel) as pool:
-        futures = {pool.submit(translate_one, i, lang, True): lang['code']
+        futures = {pool.submit(translate_safe, i, lang, True): lang['code']
                    for i, lang in enumerate(targets, start=1)}
         for fut in as_completed(futures):
             finished(*fut.result())

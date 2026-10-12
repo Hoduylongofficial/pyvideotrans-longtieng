@@ -23,6 +23,8 @@ BATCH = 40
 
 # Số, ký hiệu tiền / %, ký hiệu dùng như chữ, chữ viết tắt toàn chữ hoa (SOC, ISO, GDPR, EU)
 _NEEDS = re.compile(r'\d|[$€£¥₹₩%&/+#@=~]|(?<![A-Za-z])[A-Z]{2,}(?![a-z])')
+# Phải viết lại thành chữ thì mới đọc đúng (chữ số, tiền, %)
+_DIGITS = re.compile(r'\d|[$€£¥₹₩%]')
 
 PROMPT = """You prepare {lang} subtitle lines to be read aloud by a {lang} text-to-speech voice.
 Each line in <INPUT> has the form "id<TAB>text". Rewrite each text exactly as a native {lang} speaker would read it aloud:
@@ -95,21 +97,26 @@ def build(cfg: dict, code: str, target_sub: Path, folder: Path) -> tuple:
     try:
         cached = json.loads(path.read_text(encoding='utf-8'))
         if cached.get('src') == src:
-            return len(cached.get('map') or {}), len(cached.get('map') or {})
-    except (OSError, ValueError, AttributeError):
+            n = len(cached.get('map') or {})
+            return int(cached.get('need', n)), int(cached.get('done', n))
+    except (OSError, ValueError, AttributeError, TypeError):
         pass
 
     lines = list(dict.fromkeys(flat(it['text']) for it in get_subtitle_from_srt(str(target_sub))))
     todo = [t for t in lines if t and needs_speaking(t)]
-    mapping = {}
+    mapping, answered = {}, {}
     if todo:
         _, lang_name = get_source_target_code(show_target=code, translate_type=int(cfg.get('translate_type', 0)))
         for start in range(0, len(todo), BATCH):
-            chunk = todo[start:start + BATCH]
-            for t, spoken in _ask(cfg, lang_name, code, chunk).items():
-                # Bỏ câu AI trả giống hệt / dài bất thường (bịa thêm): giữ nguyên câu phụ đề cho câu đó
-                if spoken != t and len(spoken) <= 4 * len(t) + 40:
-                    mapping[t] = spoken
+            answered.update(_ask(cfg, lang_name, code, todo[start:start + BATCH]))
+        for t, spoken in answered.items():
+            # Bỏ câu AI trả giống hệt / dài bất thường (bịa thêm): giữ nguyên câu phụ đề cho câu đó
+            if spoken != t and len(spoken) <= 4 * len(t) + 40:
+                mapping[t] = spoken
+    # Câu AI giữ nguyên là đúng khi chỉ có chữ viết tắt đọc như cũ (GPU, ComfyUI). Câu còn chữ số / ký hiệu
+    # tiền mà không được viết lại mới là thiếu thật (log 12/10/2026: báo "thiếu" 300/761 câu, đa số là GPU)
+    done = sum(1 for t in todo if t in mapping or (t in answered and not _DIGITS.search(t)))
     folder.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'src': src, 'map': mapping}, ensure_ascii=False, indent=2), encoding='utf-8')
-    return len(todo), len(mapping)
+    path.write_text(json.dumps({'src': src, 'need': len(todo), 'done': done, 'map': mapping},
+                               ensure_ascii=False, indent=2), encoding='utf-8')
+    return len(todo), done
