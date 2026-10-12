@@ -199,14 +199,20 @@ def quality_summary(lines: list) -> str:
     # Dịch chạy song song với lồng tiếng: hết pha dịch là dòng "Dịch xong N ngôn ngữ" (bản cũ: dòng [2/2])
     t_trans = _span(lines, '[1/2] Dịch phụ đề', 'Dịch xong') or _span(lines, '[1/2] Dịch phụ đề', '[2/2] Lồng tiếng')
     t_dub = _span(lines, '[2/2] Lồng tiếng', 'Hoàn tất sau')
-    per_lang = [int(m[1]) * 60 + int(m[2]) for l in lines if '[gốc]' not in l
-                for m in [re.search(r' — xong sau (\d+)m(\d+)s', l)] if m]
+    per_lang = [int(m[1] or 0) * 3600 + int(m[2]) * 60 + int(m[3]) for l in lines if '[gốc]' not in l
+                for m in [re.search(r' — xong sau (?:(\d+)h)?(\d+)m(\d+)s', l)] if m]
+    # "Máy đã ngủ 6h36m30s (...)": thời gian các pha tính cả lúc ngủ, ghi kèm để khỏi hiểu nhầm là chậm
+    slept = sum(int(m[1] or 0) * 3600 + int(m[2]) * 60 + int(m[3]) for l in lines
+                for m in [re.search(r'Máy đã ngủ (?:(\d+)h)?(\d+)m(\d+)s', l)] if m)
     if t_trans is not None:
         timing.append(f'Dịch {_fmt(t_trans)}')
     if t_dub is not None:
         timing.append(f'Lồng tiếng + render {_fmt(t_dub)}')
     if per_lang:
-        timing.append(f'TB {_fmt(sum(per_lang) / len(per_lang))}/ngôn ngữ')
+        # trung vị: 1-2 ngôn ngữ dính lúc máy ngủ / chạy lại không kéo lệch cả số
+        timing.append(f'TB {_fmt(sorted(per_lang)[len(per_lang) // 2])}/ngôn ngữ')
+    if slept:
+        timing.append(f'💤 máy ngủ {_fmt(slept)} (đã tính trong các số trên)')
     if timing:
         out.append('⏱ ' + ' · '.join(timing))
 

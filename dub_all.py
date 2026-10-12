@@ -122,6 +122,7 @@ class Log:
         self.fh = self.logfile.open('a', encoding='utf-8')
         self._lock = threading.Lock()
         self.last = time.monotonic()
+        self.slept = 0.0  # tổng số giây máy ngủ giữa chừng (Sleep / gập nắp)
         self._closed = threading.Event()
         threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -143,7 +144,19 @@ class Log:
         """Màn hình im vài phút (render cuối ~4-5 phút không in gì, dịch lại 1 ngôn ngữ ~4 phút) thì
         nhân viên tưởng treo và tắt cửa sổ: log máy nhân viên 10/2026 tắt giữa lúc đang render Hà Lan
         bình thường. Chỉ in ra màn hình, không ghi file log."""
+        tick = time.time()
         while not self._closed.wait(30):
+            # Chờ 30s mà đồng hồ nhảy hẳn vài phút = cả máy vừa ngủ (log máy nhân viên 12/10/2026: im 6h36m
+            # từ 12:56 tới 19:32, mở máy lên mới báo "treo 30 phút" cho fr/it). Ghi rõ để khỏi nhầm là treo.
+            now = time.time()
+            gap = now - tick - 30
+            tick = now
+            if gap >= SLEEP_GAP_SECONDS:
+                self.slept += gap
+                self(f'  [CẢNH BÁO] Máy đã ngủ {fmt_duration(gap)} '
+                     f'({time.strftime("%H:%M", time.localtime(now - gap))} -> {time.strftime("%H:%M")})'
+                     f'{sleep_reason(gap)} — mọi việc dừng theo, giờ chạy tiếp. Đang lồng tiếng đừng cho máy '
+                     f'ngủ (Start > Sleep, nút nguồn, gập nắp laptop)')
             idle = time.monotonic() - self.last
             if idle >= HEARTBEAT_SECONDS:
                 with self._lock:
@@ -157,16 +170,45 @@ class Log:
 
 
 HEARTBEAT_SECONDS = 120
+SLEEP_GAP_SECONDS = 120
+
+# "Sleep Reason" trong sự kiện Kernel-Power 42 của Windows
+SLEEP_REASONS = {'application api': 'có người chọn Sleep (menu Start / phần mềm)',
+                 'power button': 'bấm nút nguồn', 'sleep button': 'bấm nút Sleep',
+                 'lid': 'gập nắp laptop', 'button or lid': 'bấm nút nguồn hoặc gập nắp laptop',
+                 'system idle': 'máy tự ngủ vì lâu không đụng chuột / bàn phím',
+                 'hibernate from sleep': 'đang ngủ lâu nên chuyển sang Hibernate',
+                 'battery': 'hết pin', 'low battery': 'pin yếu'}
+
+
+def sleep_reason(gap: float) -> str:
+    """Lý do Windows ghi lại cho lần ngủ vừa rồi (sự kiện Kernel-Power 42), dạng ', lý do: ...'."""
+    if sys.platform != 'win32':
+        return ''
+    query = ("*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=42) and "
+             f"TimeCreated[timediff(@SystemTime) <= {int((gap + 600) * 1000)}]]]")
+    try:
+        out = subprocess.run(['wevtutil', 'qe', 'System', f'/q:{query}', '/c:1', '/rd:true', '/f:text'],
+                             capture_output=True, text=True, errors='replace', timeout=20).stdout
+    except Exception:  # noqa: BLE001 - chỉ để ghi chú thêm
+        return ''
+    m = re.search(r'Sleep Reason:\s*(.+)', out)
+    if not m:
+        return ''
+    raw = m[1].strip(' \t\r\x00')
+    return f', lý do: {SLEEP_REASONS.get(raw.lower(), raw)}'
 
 
 def keep_awake() -> None:
-    """Không cho Windows tự ngủ khi đang chạy (cả loạt ~1-2 giờ, máy văn phòng hay đặt ngủ sau 15-30 phút
-    không đụng chuột). Tự hết hiệu lực khi chương trình thoát. Gập nắp laptop thì vẫn ngủ."""
+    """Không cho Windows tự ngủ khi đang chạy (cả loạt nhiều giờ, máy văn phòng hay đặt ngủ sau 15-30 phút
+    không đụng chuột). Giữ cả màn hình sáng: máy kiểu Modern Standby tắt màn hình là ngủ luôn, bỏ qua
+    ES_SYSTEM_REQUIRED. Tự hết hiệu lực khi chương trình thoát. Bấm Sleep / gập nắp laptop thì vẫn ngủ."""
     if sys.platform == 'win32':
         try:
             import ctypes
-            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
-            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x00000001, 0x00000002
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+                                                           | ES_DISPLAY_REQUIRED)
         except Exception:  # noqa: BLE001
             pass
 
@@ -381,8 +423,15 @@ def run_cli(cli_args: list, log: Log, task_log: Path, env: dict | None = None,
         stalled = threading.Event()
 
         def watchdog():
+            tick = time.monotonic()
             while proc.poll() is None:
-                if time.monotonic() - last_output[0] > stall_timeout:
+                now = time.monotonic()
+                if now - tick > 60:
+                    # máy vừa ngủ (vòng 5s mà trôi cả phút): lúc ngủ tiến trình không chạy được, không phải
+                    # treo — không tính khoảng đó, kẻo vừa mở máy là giết tiến trình đang render dở
+                    last_output[0] += now - tick
+                tick = now
+                if now - last_output[0] > stall_timeout:
                     stalled.set()
                     _kill_tree(proc)
                     return
@@ -2326,7 +2375,8 @@ def main() -> int:
         skipped = sum(1 for v in stats.values() if v == 'skipped')
         failed = [k for k, v in stats.items() if v == 'failed']
 
-        summary = f'{fmt_duration(elapsed)} — {ok} thành công, {skipped} bỏ qua, {len(failed)} lỗi'
+        slept = f' (trong đó máy ngủ {fmt_duration(log.slept)})' if log.slept else ''
+        summary = f'{fmt_duration(elapsed)}{slept} — {ok} thành công, {skipped} bỏ qua, {len(failed)} lỗi'
         log('')
         log('=' * 70)
         log(f'  Hoàn tất sau {summary}')
