@@ -26,6 +26,10 @@ _RESET_RE = re.compile(r'reset after\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+
 _cooldown_cache = {}
 
 
+class LLMTimeoutError(TranslateSrtError):
+    """Model nhận yêu cầu rồi treo, quá llm_timeout vẫn không trả lời"""
+
+
 def _cooling_models(ainame: str) -> set:
     """Model của kênh này đang chờ mở lại hạn mức"""
     import json
@@ -136,7 +140,7 @@ class OpenAICampat(BaseTrans):
         t.start()
         t.join(seconds)
         if t.is_alive():
-            raise TranslateSrtError(f'[{self.ainame}] {model_name} no response after {int(seconds)}s: {self.api_url}')
+            raise LLMTimeoutError(f'[{self.ainame}] {model_name} no response after {int(seconds)}s: {self.api_url}')
         if 'error' in box:
             raise box['error']
         return box['result']
@@ -198,6 +202,15 @@ class OpenAICampat(BaseTrans):
                 try:
                     response = self._create_with_keys(kwargs)
                     break
+                except LLMTimeoutError:
+                    # 9Router gemini-3.8-flash 20-21/10/2026: treo 300s rồi hỏng cả ngôn ngữ, dịch lại từ đầu
+                    # trong khi model sau vẫn chạy. Lô này hỏi luôn model sau; các lô còn lại của tiến trình
+                    # này cũng bỏ qua model treo cho khỏi chờ thêm 5 phút mỗi lô
+                    if mi == len(models) - 1:
+                        raise
+                    self._dead_models = getattr(self, '_dead_models', set()) | {model_name}
+                    logger.warning(f'[{self.ainame}] 模型 {model_name} 超时无响应，改用下一个模型 {models[mi + 1]}')
+                    self.signal(text=f'[{self.ainame}] {model_name} treo quá {kwargs["timeout"]}s, chuyển sang {models[mi + 1]}')
                 except APIStatusError as e:
                     if mi == len(models) - 1 or not self._can_try_next_model(e):
                         raise
