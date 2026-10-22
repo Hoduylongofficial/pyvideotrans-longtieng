@@ -136,6 +136,20 @@ def choose_ref() -> None:
     if not raw or not src.is_file():
         print('   Không thấy file.')
         return
+    try:
+        length = cut_ref(src)
+    except ValueError as e:
+        print(f'   {e}')
+        return
+    print(f'   Lấy {length:.1f} giây đầu của file làm giọng mẫu.')
+    print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
+    text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
+    save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
+    print(f'   Đã lưu giọng mẫu: {REF_DIR / REF_FILE}')
+
+
+def cut_ref(src: Path) -> float:
+    """Cắt file thành f5-tts/giong_mau_omnivoice.wav (mono 24 kHz). Trả về số giây đã lấy."""
     REF_DIR.mkdir(exist_ok=True)
     dest = REF_DIR / REF_FILE
     # OmniVoice nhái tốt nhất với mẫu 3-15 giây: cắt ở chỗ ngắt câu cuối cùng trong khoảng 6-15 giây
@@ -148,16 +162,11 @@ def choose_ref() -> None:
     tmp = REF_DIR / (REF_FILE + '.tmp.wav')
     rc = subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', str(src), '-t', f'{length:.2f}',
                          '-ac', '1', '-ar', '24000', str(tmp)]).returncode
-    print(f'   Lấy {length:.1f} giây đầu của file làm giọng mẫu.')
     if rc != 0 or not tmp.is_file():
         tmp.unlink(missing_ok=True)
-        print('   Không đọc được file âm thanh này.')
-        return
+        raise ValueError('Không đọc được file âm thanh này.')
     tmp.replace(dest)
-    print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
-    text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
-    save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
-    print(f'   Đã lưu giọng mẫu: {dest}')
+    return length
 
 
 def trial() -> None:

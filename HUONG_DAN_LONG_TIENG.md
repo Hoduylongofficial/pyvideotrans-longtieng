@@ -69,6 +69,32 @@ bị chặn lỗi 429 liên tục, chậm hơn 3–7 lần, và dịch tiếng N
 văn nói thay vì văn lịch sự) lẫn sai thuật ngữ miễn trừ trách nhiệm. Xem mục
 "Ghi chú kỹ thuật" nếu vẫn muốn thử.
 
+### 1.5a Trang cài đặt: `CAI_DAT.bat` (dễ nhất)
+
+Bấm đúp `CAI_DAT.bat` → trình duyệt tự mở trang cài đặt (chỉ mở trên máy này, `127.0.0.1`).
+Đóng cửa sổ đen khi cài xong. Thay đổi áp dụng từ **lần chạy `LONG_TIENG` tiếp theo**;
+đang mở `MO_PHAN_MEM` thì đóng nó trước khi bấm Lưu.
+
+| Tab | Làm gì |
+|---|---|
+| Tổng quan | Xem mọi cài đặt đang dùng, mục nào do quản trị đặt chung |
+| Dịch | Kênh dịch, URL 9Router, **chuỗi model** (lấy danh sách từ 9Router, bấm **Thử từng model** để biết model nào chết / treo / sai tên), số ngôn ngữ dịch cùng lúc, thời gian chờ AI |
+| API key | Thêm / xoá / thử key từng kênh (key chỉ lưu trên máy, không lên GitHub) |
+| Giọng đọc | Edge-TTS / OmniVoice (Modal), RunPod dự phòng, kiểm tra server, chọn giọng mẫu |
+| Telegram | Token bot, tìm nhóm có bot, gửi thử |
+| Lồng tiếng & render | Nhạc nền, số video render cùng lúc, đọc lại cho vừa khung, chất lượng video, âm lượng |
+| Cấu hình chung | Chỉ máy quản trị: chọn mục **mọi máy dùng chung** rồi **Đẩy lên GitHub** |
+
+**Cấu hình chung (`cau_hinh_chung.json`):** máy quản trị đánh dấu mục nào dùng chung (vd chuỗi
+model 9Router), bấm Lưu rồi Đẩy lên GitHub; máy nhân viên chạy `CAP_NHAT.bat` là áp dụng, trên
+trang cài đặt các mục đó hiện 🔒 và không sửa được. Key, token, URL máy chủ riêng, ID nhóm Telegram
+**không bao giờ** vào cấu hình chung (repo GitHub công khai). Bỏ một mục khỏi cấu hình chung thì các
+máy giữ giá trị cuối cùng.
+
+Mục ở tab "Lồng tiếng & render" lưu vào `dub_all.local.json` (riêng máy này, `CAP_NHAT.bat` không
+đụng tới), đè lên `dub_all.config.json`. `DOI_MODEL.bat`, `DOI_TTS.bat`, `CAI_TELEGRAM.bat` vẫn dùng
+được như cũ.
+
 ### 1.5b Đổi model / thêm nhiều API key: `DOI_MODEL.bat`
 
 Bấm đúp `DOI_MODEL.bat` → chọn số trong menu (đóng `MO_PHAN_MEM` và `LONG_TIENG` trước):
@@ -324,7 +350,12 @@ Không có tiếng Anh vì đó là ngôn ngữ gốc.
 
 ## PHẦN 4 — Muốn chỉnh gì thì sửa ở đâu
 
-Mở `dub_all.config.json` bằng Notepad. **Sửa xong nhớ lưu, giữ nguyên dấu phẩy và ngoặc.**
+Các mục có trên trang cài đặt (`CAI_DAT.bat`, tab "Lồng tiếng & render") thì nên sửa ở đó:
+sửa tay trong `dub_all.config.json` sẽ bị `CAP_NHAT.bat` ghi đè khi cập nhật, và bị
+`dub_all.local.json` / `cau_hinh_chung.json` đè lên nếu mục đó đã có trong hai file này.
+
+Mục khác (ngôn ngữ, giọng Edge, phụ đề): mở `dub_all.config.json` bằng Notepad.
+**Sửa xong nhớ lưu, giữ nguyên dấu phẩy và ngoặc.**
 
 | Muốn gì | Sửa dòng nào |
 |---|---|

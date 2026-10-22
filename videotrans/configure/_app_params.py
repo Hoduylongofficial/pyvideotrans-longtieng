@@ -8,6 +8,7 @@ from typing import Dict
 
 from videotrans.configure._paths import ROOT_DIR
 from videotrans.configure._logging import _write_with_retry
+from videotrans.configure._shared_cfg import section as shared_section
 from videotrans.configure.contants import (
     DEFAULT_GEMINI_MODEL, OPENAITTS_ROLES, GEMINI_TTS_MODELS,
     XIAOMI_MODELS, XIAOMI_TTS_MODELS, ELEVENLABS_TTS_MODELS,
@@ -57,6 +58,8 @@ class AppParams:
             self._apply_dict(default)
             self._save_to_disk()
 
+        # cau_hinh_chung.json (máy quản trị đẩy qua GitHub) thắng giá trị riêng của máy
+        default.update(shared_section('params', ROOT_DIR))
         self._apply_dict(default)
         return self.to_dict()
 
