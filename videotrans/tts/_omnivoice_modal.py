@@ -341,7 +341,7 @@ def _fleet_call(method: str, path: str, attempts: int = 3, **kwargs) -> requests
         try:
             r = requests.request(method, url, headers=headers, timeout=60, **kwargs)
             if r.status_code == 401:
-                raise FleetError('sai API key (fleet_api_key)')
+                raise FleetError('sai API key (fleet_api_key). Nhập lại bằng DOI_TTS.bat mục 7.')
             if r.status_code < 500:
                 return r
             last = f'HTTP {r.status_code} {r.text[:200].strip()}'

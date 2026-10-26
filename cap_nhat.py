@@ -5,7 +5,7 @@ Cập nhật bộ lồng tiếng lên bản mới nhất trên GitHub (CAP_NHAT.
 Chỉ dùng thư viện chuẩn của Python, không cần cài Git.
   1. Hỏi GitHub commit mới nhất của nhánh main, so với file .phienban.
   2. Tải bản zip của commit đó, chép đè lên thư mục hiện tại.
-     Không đụng tới: API key (videotrans/params.json), videotrans/cfg.json, dub_all.local.json,
+     Không đụng tới: API key (videotrans/params.json), videotrans/cfg.json,
      update_token.txt, .venv, models, output... (những thứ này không có trên GitHub).
      dub_all.config.json được cập nhật nhưng giữ nguyên kênh dịch + số dịch song song
      mà máy này đã chọn bằng DOI_MODEL.bat.
@@ -57,7 +57,7 @@ KEEP_DUB_VALUES = ('translate_type', 'translate_parallel', 'tts_type', 'tts_conc
                    'video_encoder')
 # Không bao giờ ghi đè / xoá, kể cả khi lỡ có trên GitHub
 PROTECTED = {'videotrans/params.json', 'videotrans/cfg.json', 'videotrans/encoder_choice.json', 'update_token.txt',
-             '.phienban', 'dub_all.local.json'}
+             '.phienban'}
 PROTECTED_DIRS = ('.venv/', 'models/', 'output/', 'logs/', '.git/')
 DEP_FILES = ('pyproject.toml', 'uv.lock')
 

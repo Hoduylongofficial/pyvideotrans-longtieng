@@ -8,10 +8,11 @@
   4) Đọc thử + ước tính thời gian / chi phí
   5) (Máy quản trị) deploy / cập nhật server trên Modal, tạo key
   6) GPU RunPod dự phòng: Modal hết hạn mức tháng thì tự chuyển sang RunPod (endpoint ID + API key)
+  7) GPU máy nhà (GPU Fleet): các PC nhà mình đọc trước, GPU thuê chỉ đọc bù (URL + API key)
 
 Ghi vào dub_all.config.json: "tts_type"; videotrans/params.json: omnivoice_modal_url,
-omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text, runpod_endpoint_id, runpod_api_key
-(params.json không lên GitHub).
+omnivoice_modal_key, omnivoice_ref_wav, omnivoice_ref_text, runpod_endpoint_id, runpod_api_key,
+fleet_url, fleet_api_key (params.json không lên GitHub).
 """
 import base64
 import io
@@ -61,6 +62,11 @@ def runpod() -> tuple:
     return str(p.get('runpod_endpoint_id', '') or '').strip(), str(p.get('runpod_api_key', '') or '').strip()
 
 
+def fleet() -> tuple:
+    p = params()
+    return str(p.get('fleet_url', '') or '').strip(), str(p.get('fleet_api_key', '') or '').strip()
+
+
 # ---------------------------------------------------------------------------
 def show_status() -> None:
     t = int(dub_cfg().get('tts_type', EDGE_TTS))
@@ -70,7 +76,9 @@ def show_status() -> None:
     print(f'   Server GPU Modal    : {url or "(chưa nhập)"}' + (f'  · key {mask(key)}' if key else ''))
     rp_id, rp_key = runpod()
     print(f'   GPU RunPod dự phòng : {rp_id or "(chưa nhập)"}' + (f'  · key {mask(rp_key)}' if rp_key else ''))
-    ref = str(p.get('omnivoice_ref_wav', '') or '')
+    fl_url, fl_key = fleet()
+    print(f'   GPU máy nhà (Fleet) : {fl_url or "(chưa nhập)"}' + (f'  · key {mask(fl_key)}' if fl_key else ''))
+    ref =str(p.get('omnivoice_ref_wav', '') or '')
     print(f'   Giọng mẫu OmniVoice : {"file cố định " + ref if ref else "nhái từng câu từ video gốc"}')
 
 
@@ -136,20 +144,6 @@ def choose_ref() -> None:
     if not raw or not src.is_file():
         print('   Không thấy file.')
         return
-    try:
-        length = cut_ref(src)
-    except ValueError as e:
-        print(f'   {e}')
-        return
-    print(f'   Lấy {length:.1f} giây đầu của file làm giọng mẫu.')
-    print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
-    text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
-    save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
-    print(f'   Đã lưu giọng mẫu: {REF_DIR / REF_FILE}')
-
-
-def cut_ref(src: Path) -> float:
-    """Cắt file thành f5-tts/giong_mau_omnivoice.wav (mono 24 kHz). Trả về số giây đã lấy."""
     REF_DIR.mkdir(exist_ok=True)
     dest = REF_DIR / REF_FILE
     # OmniVoice nhái tốt nhất với mẫu 3-15 giây: cắt ở chỗ ngắt câu cuối cùng trong khoảng 6-15 giây
@@ -162,11 +156,16 @@ def cut_ref(src: Path) -> float:
     tmp = REF_DIR / (REF_FILE + '.tmp.wav')
     rc = subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', str(src), '-t', f'{length:.2f}',
                          '-ac', '1', '-ar', '24000', str(tmp)]).returncode
+    print(f'   Lấy {length:.1f} giây đầu của file làm giọng mẫu.')
     if rc != 0 or not tmp.is_file():
         tmp.unlink(missing_ok=True)
-        raise ValueError('Không đọc được file âm thanh này.')
+        print('   Không đọc được file âm thanh này.')
+        return
     tmp.replace(dest)
-    return length
+    print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
+    text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
+    save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
+    print(f'   Đã lưu giọng mẫu: {dest}')
 
 
 def trial() -> None:
@@ -264,6 +263,50 @@ def use_runpod() -> None:
     print('   ĐÃ LƯU RunPod dự phòng.')
 
 
+def check_fleet(url: str, key: str) -> bool:
+    import requests
+    print('   Kiểm tra server GPU máy nhà...')
+    try:
+        r = requests.get(url.rstrip('/') + '/v1/stats', timeout=30, headers={'Authorization': f'Bearer {key}'})
+    except Exception as e:  # noqa: BLE001
+        print(f'   Không kết nối được: {e}')
+        return False
+    if r.status_code == 401:
+        print('   SAI API KEY.')
+        return False
+    if r.status_code != 200:
+        print(f'   Không phải server GPU Fleet (HTTP {r.status_code}). Kiểm tra lại URL.')
+        return False
+    w = r.json().get('workers', {})
+    print(f'   Kết nối OK (máy nhà đang online: {w.get("ready", 0) + w.get("working", 0)}; máy tắt thì '
+          f'GPU thuê tự đọc thay).')
+    return True
+
+
+def use_fleet() -> None:
+    url, key = fleet()
+    print('\n   GPU máy nhà (GPU Fleet): các PC nhà mình đọc giọng trước (không tốn tiền), GPU thuê Modal /')
+    print('   RunPod chỉ đọc bù khi máy nhà không kịp, tắt máy hoặc đọc lỗi. Cùng giọng OmniVoice.')
+    print('   URL + API key lấy từ người quản trị (trang /admin của server, tab "API key", mỗi máy 1 key).')
+    ans = ask(f'   URL server [Enter = {url or "chưa có"}]: ').strip().strip('"')
+    if ans:
+        url = ans.rstrip('/').removesuffix('/admin')
+    ans = ask(f'   API key [Enter = {mask(key) if key else "chưa có"}, gõ - để bỏ GPU máy nhà]: ').strip().strip('"')
+    if ans == '-':
+        save_params(fleet_url='', fleet_api_key='')
+        print('   Đã bỏ GPU máy nhà, chỉ dùng GPU thuê.')
+        return
+    if ans:
+        key = ans
+    if not url or not key:
+        print('   Thiếu URL hoặc API key, huỷ.')
+        return
+    if not check_fleet(url, key) and not ask_yes('   Vẫn lưu?', default=False):
+        return
+    save_params(fleet_url=url, fleet_api_key=key)
+    print('   ĐÃ LƯU GPU máy nhà.')
+
+
 # ---------------------------------------------------------------------------
 def _modal(*args, capture=False):
     cmd = ['uvx', '--from', 'modal', 'modal', *args]
@@ -326,12 +369,13 @@ def main() -> int:
         print('   ' + '-' * 40)
         print('   5) [Máy quản trị] Deploy / cập nhật server trên Modal, tạo key')
         print('   6) GPU RunPod dự phòng khi Modal hết hạn mức (nhập endpoint ID + API key)')
+        print('   7) GPU máy nhà (GPU Fleet) đọc trước, GPU thuê chỉ đọc bù (nhập URL + API key)')
         print('   0) Thoát')
         choice = ask('\n   Nhập số rồi Enter: ')
         if choice in ('0', 'q'):
             return 0
         actions = {'1': use_edge, '2': use_omnivoice, '3': choose_ref, '4': trial, '5': admin_deploy,
-                   '6': use_runpod}
+                   '6': use_runpod, '7': use_fleet}
         if choice in actions:
             actions[choice]()
             pause()

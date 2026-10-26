@@ -8,7 +8,6 @@ from typing import Dict, List
 
 from videotrans.configure._paths import ROOT_DIR
 from videotrans.configure._logging import _write_with_retry
-from videotrans.configure._shared_cfg import section as shared_section
 from videotrans.configure.contants import (
     DEFAULT_GEMINI_MODEL, ChatTTS_VOICE, Qwentts_Models,
     Whisper_Models, Zijiehuoshan_Model, Zhipuai_Model, Localllm_Model, Azure_Model,
@@ -101,8 +100,6 @@ class AppSettings:
             merged_settings[m] = ",".join(_de)
 
         default.update(merged_settings)
-        # cau_hinh_chung.json (máy quản trị đẩy qua GitHub) thắng giá trị riêng của máy
-        default.update({k: v for k, v in shared_section('settings', ROOT_DIR).items() if k in default})
 
         self.WHISPER_MODEL_LIST = re.split(r'[,，]', default.get('model_list', ''))
         self.ChatTTS_voicelist = re.split(r'[,，]', str(default.get('chattts_voice', '')))

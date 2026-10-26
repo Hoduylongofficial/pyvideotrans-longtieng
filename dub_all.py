@@ -227,39 +227,9 @@ def load_config(path: Path) -> dict:
     if not path.exists():
         sys.exit(f'[LỖI] Không tìm thấy file cấu hình: {path}')
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8-sig'))
+        return json.loads(path.read_text(encoding='utf-8-sig'))
     except json.JSONDecodeError as e:
         sys.exit(f'[LỖI] File cấu hình {path} không phải JSON hợp lệ: {e}')
-    if path.resolve() == DEFAULT_CONFIG.resolve():
-        cfg.update(local_overrides())
-        cfg.update(shared_config('dub_all'))
-    return cfg
-
-
-# Chỉnh riêng của máy này (CAI_DAT.bat ghi): không lên GitHub, CAP_NHAT.bat không đụng tới.
-# dub_all.config.json chỉ giữ lại vài mục khi cập nhật (cap_nhat.KEEP_DUB_VALUES) nên mục khác ghi ở đây.
-LOCAL_CONFIG = ROOT_DIR / 'dub_all.local.json'
-
-
-def local_overrides() -> dict:
-    try:
-        data = json.loads(LOCAL_CONFIG.read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in data.items() if not k.startswith('_')} if isinstance(data, dict) else {}
-
-
-def shared_config(section: str) -> dict:
-    """cau_hinh_chung.json (videotrans/configure/_shared_cfg.py), nạp thẳng file để khỏi kéo theo cả videotrans"""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        '_shared_cfg', ROOT_DIR / 'videotrans' / 'configure' / '_shared_cfg.py')
-    try:
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.section(section, ROOT_DIR)
-    except Exception:  # noqa: BLE001 - thiếu / hỏng thì chạy như chưa có cấu hình chung
-        return {}
 
 
 def is_cjk(code: str) -> bool:
