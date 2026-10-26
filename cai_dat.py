@@ -26,7 +26,7 @@ TABS = {
              'dub.merge_fragments', 'dub.tts_speak_text'],
     'model_khac': ['params.openrouter_model', 'params.gemini_model', 'params.deepseek_model'],
     'giong': ['dub.tts_type', 'params.omnivoice_modal_url', 'params.omnivoice_modal_key',
-              'params.runpod_endpoint_id', 'params.runpod_api_key'],
+              'params.runpod_endpoint_id', 'params.runpod_api_key', 'params.fleet_url', 'params.fleet_api_key'],
     'telegram': ['params.telegram_bot_token', 'params.telegram_chat_id', 'dub.telegram_notify'],
     'render': ['dub.is_separate', 'dub.backaudio_volume', 'dub.dub_parallel', 'dub.dub_prep_ahead',
                'dub.tts_prefetch_parallel', 'dub.tts_fit_ratio', 'dub.tts_shorten_ratio', 'dub.dub_stall_minutes',

@@ -85,6 +85,9 @@ FIELDS = [
     Field('params', 'omnivoice_modal_key', 'Key server OmniVoice (Modal)', 'secret', ''),
     Field('params', 'runpod_endpoint_id', 'Endpoint ID RunPod (GPU dự phòng khi Modal hết hạn mức)', 'text', ''),
     Field('params', 'runpod_api_key', 'API key RunPod', 'secret', ''),
+    Field('params', 'fleet_url', 'URL server GPU máy nhà (GPU Fleet) — trống = chỉ dùng GPU thuê',
+          'text', ''),
+    Field('params', 'fleet_api_key', 'API key GPU Fleet (cấp ở trang /admin, tab API key)', 'secret', ''),
     # --- Telegram
     Field('params', 'telegram_bot_token', 'Token bot Telegram', 'secret', ''),
     Field('params', 'telegram_chat_id', 'ID nhóm Telegram', 'text', ''),

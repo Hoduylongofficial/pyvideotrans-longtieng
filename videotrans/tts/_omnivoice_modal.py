@@ -302,6 +302,176 @@ def _post(url: str, key: str, body: dict, attempts: int = 3) -> dict:
     return _post_runpod(body)
 
 
+# ---------------------------------------------------------------------------
+# GPU Fleet (dự án D:\GPU Free): GPU các PC nhà mình, không tốn tiền. Có fleet_url + fleet_api_key trong
+# params.json thì prefetch() cho máy nhà đọc trước; GPU thuê (Modal -> RunPod) chỉ đọc bù lô của ngôn ngữ
+# sắp tới lượt render mà máy nhà chưa kịp nhận, và câu máy nhà đọc lỗi / bỏ dở. Máy nhà cài cùng
+# omnivoice==0.2.0 như Modal nên giọng giống hệt. Máy nhà không trả lời Whisper nghe lại ('heard'):
+# câu máy nhà đọc không được chấm điểm khi bật tts_qc_min.
+FLEET_PER_WORKER = 2     # lô đang gửi cho mỗi máy nhà online: 1 lô đang đọc + 1 lô chờ sẵn trên server
+FLEET_MAX_LANES = 16
+FLEET_STALL_S = 180      # job không thêm câu nào xong quá bấy nhiêu giây (máy tắt / chủ máy mở game) -> GPU thuê đọc nốt
+FLEET_POLL_S = 2
+FLEET_STATS_TTL = 30
+PAID_AFTER_S = 60        # lô chờ quá bấy nhiêu giây mà máy nhà chưa nhận
+PAID_LANGS = 2           # ... và thuộc 2 ngôn ngữ sắp render nhất thì GPU thuê đọc giúp
+PAID_COST_PER_LINE = 0.0007   # $/câu trên Modal L4 (đo 10/2026), chỉ để báo tiền máy nhà đỡ được
+PROVIDER_NAMES = {'fleet': 'máy nhà', 'modal': 'Modal', 'runpod': 'RunPod'}
+
+
+class FleetError(RuntimeError):
+    def __init__(self, msg: str, audios: list = None):
+        super().__init__(msg)
+        self.audios = audios or []   # base64 các câu đã đọc xong trước khi lỗi ('' = chưa có)
+
+
+def fleet_configured() -> bool:
+    return bool(str(params.get('fleet_url', '')).strip() and str(params.get('fleet_api_key', '')).strip())
+
+
+_fleet_stats = {'at': 0.0, 'online': 0}
+_fleet_lock = threading.Lock()
+
+
+def _fleet_call(method: str, path: str, attempts: int = 3, **kwargs) -> requests.Response:
+    url = str(params['fleet_url']).strip().rstrip('/') + path
+    headers = {'Authorization': f'Bearer {str(params["fleet_api_key"]).strip()}'}
+    last = None
+    for n in range(attempts):
+        try:
+            r = requests.request(method, url, headers=headers, timeout=60, **kwargs)
+            if r.status_code == 401:
+                raise FleetError('sai API key (fleet_api_key)')
+            if r.status_code < 500:
+                return r
+            last = f'HTTP {r.status_code} {r.text[:200].strip()}'
+        except FleetError:
+            raise
+        except Exception as e:  # noqa: BLE001 - mạng chập chờn / Cloudflare: thử lại
+            last = e
+        time.sleep(3 * (n + 1))
+    raise FleetError(f'{method} {path} lỗi: {last}')
+
+
+def fleet_online() -> int:
+    """Số máy nhà đang nhận việc (ready + working), hỏi server tối đa FLEET_STATS_TTL giây/lần; lỗi = 0"""
+    with _fleet_lock:
+        if time.time() - _fleet_stats['at'] < FLEET_STATS_TTL:
+            return _fleet_stats['online']
+        try:
+            r = _fleet_call('GET', '/v1/stats', attempts=1)
+            r.raise_for_status()
+            w = r.json().get('workers') or {}
+            n = int(w.get('ready', 0)) + int(w.get('working', 0))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'GPU Fleet: không hỏi được số máy online ({e})')
+            n = 0
+        _fleet_stats.update(at=time.time(), online=n)
+        return n
+
+
+def _post_fleet(body: dict) -> dict:
+    """Cùng body /tts của Modal -> {'audios': [base64 | ''], 'provider': 'fleet'} đúng thứ tự câu. Tải từng
+    câu ngay khi xong. FLEET_STALL_S giây không thêm câu nào xong thì huỷ job, FleetError mang theo các câu
+    đã có."""
+    items = body.get('items') or []
+    keep = [i for i, it in enumerate(items) if str(it.get('text', '')).strip()]   # server không nhận câu rỗng
+    audios = [''] * len(items)
+    if not keep:
+        return {'audios': audios, 'provider': 'fleet'}
+    r = _fleet_call('POST', '/v1/jobs', json={'refs': body.get('refs') or {}, 'items': [items[i] for i in keep],
+                                              'num_step': int(body.get('num_step', 32))})
+    if r.status_code != 200:
+        raise FleetError(f'gửi job lỗi HTTP {r.status_code} {r.text[:200].strip()}')
+    job = r.json()['job_id']
+    seen, last = set(), time.time()
+    try:
+        while True:
+            time.sleep(FLEET_POLL_S)
+            st = _fleet_call('GET', f'/v1/jobs/{job}', params={'items': 1})
+            if st.status_code != 200:
+                raise FleetError(f'hỏi trạng thái lỗi HTTP {st.status_code}')
+            d = st.json()
+            for it in d.get('items') or []:
+                k = it['index']
+                if k in seen or it['status'] not in ('done', 'failed', 'cancelled'):
+                    continue
+                if it['status'] == 'done':
+                    a = _fleet_call('GET', f'/v1/jobs/{job}/items/{k}/audio')
+                    if a.status_code == 200:
+                        audios[keep[k]] = base64.b64encode(a.content).decode()
+                seen.add(k)   # câu lỗi để '' -> GPU thuê đọc lại
+                last = time.time()
+            if d['status'] != 'processing' or len(seen) == len(keep):
+                return {'audios': audios, 'provider': 'fleet'}
+            if time.time() - last > FLEET_STALL_S:
+                raise FleetError(f'{FLEET_STALL_S}s không có câu nào xong ({len(seen)}/{len(keep)} câu)')
+    except Exception as e:
+        try:
+            _fleet_call('DELETE', f'/v1/jobs/{job}', attempts=1)   # máy nhà khỏi đọc tiếp phần GPU thuê sẽ đọc
+        except Exception:  # noqa: BLE001
+            pass
+        raise FleetError(str(e), audios) from e
+
+
+def _post_shared(url: str, key: str, body: dict) -> dict:
+    """Máy nhà đọc trước; câu máy nhà lỗi / bỏ dở thì GPU thuê (_post) đọc nốt. Trả về như _post, thêm
+    'lines' = {nơi đọc: số câu}."""
+    items = body.get('items') or []
+    try:
+        audios = _post_fleet(body)['audios']
+    except Exception as e:  # noqa: BLE001 - máy nhà lỗi gì cũng không được làm hỏng lượt đọc
+        audios = list(getattr(e, 'audios', []))
+        logger.warning(f'GPU Fleet: {e} -> GPU thuê đọc nốt')
+        # Máy tắt đột ngột thì server còn báo online thêm một lúc: coi như 0 máy trong FLEET_STATS_TTL giây
+        # để lô sau đi thẳng GPU thuê, không lô nào phải chờ treo FLEET_STALL_S nữa
+        with _fleet_lock:
+            _fleet_stats.update(at=time.time(), online=0)
+    audios = (audios + [''] * len(items))[:len(items)]
+    lines = {'fleet': sum(1 for a in audios if a)}
+    out = {'audios': audios, 'provider': 'fleet', 'lines': lines}
+    miss = [i for i, (it, a) in enumerate(zip(items, audios)) if not a and str(it.get('text', '')).strip()]
+    if miss:
+        paid = _post(url, key, dict(body, items=[items[i] for i in miss]))
+        for i, a in zip(miss, paid.get('audios', [])):
+            audios[i] = a or ''
+        prov = paid.get('provider', 'modal')
+        lines[prov] = lines.get(prov, 0) + len(miss)
+        if 'heard' in paid:
+            out['heard'] = [''] * len(items)
+            for i, h in zip(miss, paid['heard']):
+                out['heard'][i] = h
+    return out
+
+
+class _Board:
+    """Hàng đợi ưu tiên của prefetch(): (ưu tiên, số thứ tự, ...). get(accept=...) chỉ lấy lô đầu tiên mà
+    accept(lô, số giây đã chờ) đồng ý — GPU thuê dùng để chỉ đọc bù lô máy nhà chưa kịp nhận."""
+
+    def __init__(self):
+        self._items, self._cv = [], threading.Condition()
+
+    def put(self, task) -> None:
+        with self._cv:
+            self._items.append((task, time.time()))
+            self._items.sort(key=lambda x: x[0][:2])
+            self._cv.notify_all()
+
+    def get(self, timeout: float, accept=None):
+        import queue
+        end = time.time() + timeout
+        with self._cv:
+            while True:
+                for n, (task, at) in enumerate(self._items):
+                    if accept is None or accept(task, time.time() - at):
+                        del self._items[n]
+                        return task
+                left = end - time.time()
+                if left <= 0:
+                    raise queue.Empty
+                self._cv.wait(left)
+
+
 def synthesize_remote(queue_tts: list, language: str, signal=None, is_exit=None) -> tuple:
     """把 queue_tts 发给 Modal 合成，结果写到 item['filename'] + '-24k.wav'。返回 (成功数, 失败数)"""
     import soundfile as sf
@@ -496,7 +666,11 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
     order = {lang: i for i, lang in enumerate(order or [lang for lang, _ in initial])}
     result = {}
     lock = threading.Lock()
-    tasks = queue.PriorityQueue()   # (优先级, 序号, 类型, 语言, 句子)：重读 > 按语言顺序的合成
+    tasks = _Board()                # (优先级, 序号, 类型, 语言, 句子)：重读 > 按语言顺序的合成
+    use_fleet = fleet_configured()
+    lane = threading.local()        # lane.fleet: luồng này gửi máy nhà trước (False = GPU thuê)
+    fleet_lock, fleet_busy = threading.Lock(), [0]   # số lô đang ở máy nhà
+    used = {}                       # nơi đọc -> số câu
     seq = iter(range(10 ** 9))
     left = {}                       # 语言 -> 未完成的任务数
     phase, rounds = {}, {}
@@ -515,7 +689,11 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                 'items': [dict(it, ref='r1', language=lang) for it in items]}
         if qc_min > 0:
             body['asr'] = True
-        return _post(url, key, body)
+        data = _post_shared(url, key, body) if getattr(lane, 'fleet', False) else _post(url, key, body)
+        with lock:
+            for where, n in (data.get('lines') or {data.get('provider', 'modal'): len(items)}).items():
+                used[where] = used.get(where, 0) + n
+        return data
 
     def outputs(lang, texts, data):
         """[(câu, raw, (nghe được, điểm) hoặc None)] theo đúng thứ tự texts; câu rỗng -> raw None"""
@@ -738,7 +916,9 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
     if total or feed is not None:
         log(f'  Tạo sẵn giọng: {parallel} lượt chạy cùng lúc trên GPU Modal (ngôn ngữ nào xong là render ngay'
             + ('; ngôn ngữ nào dịch xong là đưa lên GPU ngay' if feed is not None else f', {total} lượt') + ')'
-            + (', Whisper nghe lại từng câu' if qc_min > 0 else ''))
+            + (', Whisper nghe lại từng câu' if qc_min > 0 else '')
+            + (f'; GPU máy nhà (Fleet): {fleet_online()} máy online đọc trước, GPU thuê chỉ đọc bù'
+               if use_fleet else ''))
     for lang in list(jobs):  # 已全部在仓库中的语言：检查一下超长句后即可渲染
         if left[lang] == 0:
             left[lang] = 1
@@ -764,10 +944,35 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
     else:
         threading.Thread(target=feeder, daemon=True).start()
 
-    def worker():
+    def next_langs() -> list:
+        """PAID_LANGS ngôn ngữ chưa xong giọng gần lượt render nhất (không lấy lock: gọi trong lock của tasks)"""
+        langs = sorted(list(jobs), key=lambda l: order.get(l, 10 ** 6))
+        return [l for l in langs if l not in done_langs][:PAID_LANGS]
+
+    def fleet_take(task, age) -> bool:
+        with fleet_lock:
+            if fleet_busy[0] >= FLEET_PER_WORKER * fleet_cap[0]:
+                return False
+            fleet_busy[0] += 1
+            return True
+
+    def paid_take(task, age) -> bool:
+        # Máy nhà đang có máy online: GPU thuê chỉ nhận lô đã chờ lâu của ngôn ngữ sắp render
+        return age >= PAID_AFTER_S and task[3] in next_langs()
+
+    fleet_cap = [0]                 # số máy nhà online lúc này (fleet_online() gọi ngoài lock của tasks)
+
+    def worker(fleet=False):
+        lane.fleet = fleet
         while True:
+            accept = None
+            if use_fleet:
+                fleet_cap[0] = fleet_online()
+                accept = fleet_take if fleet else (paid_take if fleet_cap[0] else None)
+            elif fleet:
+                return
             try:
-                _, _, kind, lang, chunk = tasks.get(timeout=0.5)
+                _, _, kind, lang, chunk = tasks.get(timeout=0.5, accept=accept)
             except queue.Empty:
                 with lock:
                     if fed_all.is_set() and all(v <= 0 for v in left.values()):
@@ -806,14 +1011,23 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
                         result[lang][1] += len(chunk)
                 log(f'  [{lang}] tạo sẵn giọng: 1 lượt lỗi ({e}) — lúc render sẽ tự đọc bù')
             finally:
+                if fleet:
+                    with fleet_lock:
+                        fleet_busy[0] -= 1
                 with lock:
                     finish_task(lang)
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, parallel))]
+    threads += [threading.Thread(target=worker, args=(True,), daemon=True)
+                for _ in range(FLEET_MAX_LANES if use_fleet else 0)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     for lang in jobs:  # 出错也要放行，渲染时会自己补读缺的句子
         ready(lang)
+    if used:
+        saved = used.get('fleet', 0) * PAID_COST_PER_LINE
+        log('  Câu đã đọc theo GPU: ' + ', '.join(f'{PROVIDER_NAMES.get(k, k)} {v}' for k, v in used.items())
+            + (f' (máy nhà đỡ ~${saved:.2f} tiền GPU thuê)' if saved else ''))
     return {k: tuple(v) for k, v in result.items()}
