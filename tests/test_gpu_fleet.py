@@ -121,6 +121,28 @@ def test_fleet_down_everything_to_paid(monkeypatch, tmp_path):
     assert _decode(out) == ['modal:a', 'modal:b'] and out['lines'] == {'fleet': 0, 'modal': 2}
 
 
+def test_slow_fleet_job_hedged_when_render_waiting(monkeypatch, tmp_path):
+    fleet, modal = _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(om, 'FLEET_STALL_S', 30)
+    monkeypatch.setattr(om, 'FLEET_HEDGE_MIN_S', 0.05)
+    monkeypatch.setattr(om, 'FLEET_HEDGE_LEFT_S', 0.01)
+    body = {'items': [{'text': 'a'}, {'text': 'b treo'}, {'text': 'c'}, {'text': 'd treo'}]}
+    started = time.time()
+    out = om._post_shared('http://modal', 'k', body, urgent=lambda: True)
+    assert time.time() - started < 5                       # không phải chờ tới FLEET_STALL_S
+    assert _decode(out) == ['flac:a', 'modal:b treo', 'flac:c', 'modal:d treo']
+    assert modal == [['b treo', 'd treo']] and out['lines'] == {'fleet': 2, 'modal': 2}
+    assert fleet.deleted == ['j0']
+    assert om.fleet_online() == 3                          # máy nhà chỉ chậm: lô sau vẫn gửi máy nhà
+
+
+def test_fast_fleet_job_not_hedged_even_when_render_waiting(monkeypatch, tmp_path):
+    _, modal = _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(om, 'FLEET_HEDGE_MIN_S', 0)
+    out = om._post_shared('http://modal', 'k', {'items': [{'text': 'a'}, {'text': 'b'}]}, urgent=lambda: True)
+    assert _decode(out) == ['flac:a', 'flac:b'] and not modal
+
+
 def test_fleet_online_counts_ready_and_working_and_caches(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     assert om.fleet_online() == 3
@@ -131,7 +153,7 @@ def test_fleet_online_counts_ready_and_working_and_caches(monkeypatch, tmp_path)
 # ---------------------------------------------------------------------------
 # prefetch(): chia lô giữa máy nhà và GPU thuê
 # ---------------------------------------------------------------------------
-def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0):
+def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0, **kwargs):
     ref = tmp_path / 'ref.wav'
     sf.write(str(ref), np.zeros(om.SR, dtype=np.float32), om.SR)
     monkeypatch.setattr(om, 'fixed_ref', lambda: (str(ref), 'ref'))
@@ -142,7 +164,7 @@ def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0):
     got = {'fleet': [], 'modal': []}
     lock = threading.Lock()
 
-    def fleet(body):
+    def fleet(body, urgent=None):
         if fleet_delay:
             time.sleep(fleet_delay)
         with lock:
@@ -158,7 +180,7 @@ def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0):
     monkeypatch.setattr(om, '_post', modal)
     jobs = {lang: [f'{lang} câu {i}' for i in range(70)] for lang in ('de', 'fr', 'it', 'es')}   # 3 lô / ngôn ngữ
     logs, ready = [], []
-    res = om.prefetch(tmp_path / 'store', jobs, parallel=2, log=logs.append, on_ready=ready.append)
+    res = om.prefetch(tmp_path / 'store', jobs, parallel=2, log=logs.append, on_ready=ready.append, **kwargs)
     assert sorted(ready) == sorted(jobs) and all(v[0] == 70 for v in res.values())
     return got, logs
 
@@ -183,6 +205,19 @@ def test_prefetch_paid_gpu_helps_only_near_languages_when_fleet_slow(monkeypatch
     assert got['fleet'] and got['modal'] and len(got['fleet']) + len(got['modal']) == 12
     # máy nhà 1 máy = 2 lô cùng lúc, lô đầu hàng (de) do máy nhà nhận trước khi GPU thuê được phép nhận
     assert got['fleet'][:2] == ['de', 'de']
+
+
+def test_prefetch_paid_gpu_takes_waiting_language_at_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(om, 'PAID_AFTER_S', 100)            # chờ lâu thì không bao giờ tới trong test
+    got, _ = _prefetch_env(monkeypatch, tmp_path, online=1, fleet_delay=0.3, waiting=lambda: {'de'})
+    assert got['modal'] and set(got['modal']) == {'de'}     # chỉ ngôn ngữ render đang chờ
+    assert len(got['fleet']) + len(got['modal']) == 12
+
+
+def test_prefetch_paid_langs_follows_render_slots(monkeypatch, tmp_path):
+    monkeypatch.setattr(om, 'PAID_AFTER_S', 0.2)
+    got, _ = _prefetch_env(monkeypatch, tmp_path, online=1, fleet_delay=0.6, paid_langs=4)
+    assert set(got['modal']) == {'de', 'fr', 'it', 'es'}
 
 
 def test_without_fleet_config_behaves_as_before(monkeypatch, tmp_path):

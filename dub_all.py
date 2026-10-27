@@ -1329,12 +1329,17 @@ class TtsPrefetch:
         self.feed = None     # queue: ngôn ngữ vừa dịch xong -> đưa lên GPU (chạy song song với dịch)
         self.offered = set()
         self.make_job = None
+        self.waiting = set()  # ngôn ngữ render đang đứng chờ giọng: GPU thuê đọc giúp ngay (có GPU máy nhà)
 
     def wait(self, code: str, log: Log, head: str) -> None:
         event = self.ready.get(code)
         if event and not event.is_set():
             log(f'{head} — chờ tạo giọng trên GPU Modal...')
-            event.wait()
+            self.waiting.add(code)
+            try:
+                event.wait()
+            finally:
+                self.waiting.discard(code)
 
     def offer(self, code: str, status: str) -> None:
         """Pha dịch vừa xong 1 ngôn ngữ: đưa lên GPU; dịch lỗi thì cho render đi tiếp (sẽ báo thiếu phụ đề)."""
@@ -1521,7 +1526,10 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
                            if logs_dir else None,
                            shorten=(lambda code, rows: shorten_lines(cfg, code, rows, subs_dir, logs_dir, log))
                            if logs_dir and shorten_enabled(cfg) else None,
-                           shorten_ratio=float(cfg.get('tts_shorten_ratio', 1.3) or 0))
+                           shorten_ratio=float(cfg.get('tts_shorten_ratio', 1.3) or 0),
+                           # phase_dub mở render_parallel + prep_ahead tiến trình: bấy nhiêu ngôn ngữ chờ giọng cùng lúc
+                           paid_langs=render_parallel(cfg) + prep_ahead(cfg),
+                           waiting=lambda: frozenset(job.waiting))
             done = sum(v[0] for v in res.values())
             refit = sum(v[2] for v in res.values())
             short = sum(v[4] for v in res.values() if len(v) > 4)
