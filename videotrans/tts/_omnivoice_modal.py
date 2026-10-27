@@ -319,8 +319,9 @@ FLEET_STATS_TTL = 30
 FLEET_HEDGE_MIN_S = 20
 FLEET_HEDGE_LEFT_S = 45
 PAID_AFTER_S = 60        # lô chờ quá bấy nhiêu giây mà máy nhà chưa nhận
-PAID_LANGS = 2           # ... và thuộc bấy nhiêu ngôn ngữ sắp render nhất (dub_all truyền paid_langs = số
-                         # ngôn ngữ render chờ được cùng lúc) thì GPU thuê đọc giúp; render đang chờ thì không đợi
+PAID_LANGS = 2           # ... và thuộc bấy nhiêu ngôn ngữ render sắp làm tới (theo tiến độ render; dub_all truyền
+                         # paid_langs = số ngôn ngữ render chờ được cùng lúc) thì GPU thuê đọc giúp; render đang
+                         # chờ thì không đợi
 PAID_COST_PER_LINE = 0.0007   # $/câu trên Modal L4 (đo 10/2026), chỉ để báo tiền máy nhà đỡ được
 PROVIDER_NAMES = {'fleet': 'máy nhà', 'modal': 'Modal', 'runpod': 'RunPod'}
 
@@ -649,7 +650,7 @@ def _save(f: Path, raw: bytes, qc=None) -> None:
 def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set = frozenset(),
              slots: dict = None, fit_ratio: float = 0, on_ready=None,
              qc_min: float = 0, qc_retries: int = 2, on_qc=None, feed=None, order: list = None,
-             shorten=None, shorten_ratio: float = 0, paid_langs: int = 0, waiting=None) -> dict:
+             shorten=None, shorten_ratio: float = 0, paid_langs: int = 0, waiting=None, upcoming=None) -> dict:
     """固定参考音色下，把 {语言: [文本,...]} 全部预先合成进仓库；native 中的语言用本地口音音色。
 
     parallel 个请求同时在 Modal 上跑（每个请求一个 GPU 容器）。任务按语言顺序优先：前面的语言先合成完，
@@ -677,8 +678,11 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
     loạt. order = thứ tự ưu tiên (thứ tự render) của mọi ngôn ngữ, kể cả ngôn ngữ chưa tới.
 
     Có GPU máy nhà: paid_langs = số ngôn ngữ render chờ được cùng lúc (0 = PAID_LANGS), GPU thuê đọc bù lô
-    chờ lâu của bấy nhiêu ngôn ngữ sắp render nhất. waiting() = các ngôn ngữ render đang đứng chờ giọng: lô
-    của chúng GPU thuê nhận ngay không đợi PAID_AFTER_S, lô máy nhà đọc chậm thì GPU thuê đọc nốt.
+    chờ lâu của bấy nhiêu ngôn ngữ sắp render nhất. upcoming() = các ngôn ngữ render chưa bắt đầu, theo thứ
+    tự render: "sắp render" = paid_langs ngôn ngữ đầu danh sách đó (render chậm hơn tạo giọng thì GPU thuê
+    nghỉ, máy nhà đọc hết). Không có upcoming: paid_langs ngôn ngữ đầu tiên chưa xong giọng.
+    waiting() = các ngôn ngữ render đang đứng chờ giọng: lô của chúng GPU thuê nhận ngay không đợi
+    PAID_AFTER_S, lô máy nhà đọc chậm thì GPU thuê đọc nốt.
     """
     import queue
     fixed = fixed_ref()
@@ -975,9 +979,13 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         threading.Thread(target=feeder, daemon=True).start()
 
     def next_langs() -> list:
-        """paid_langs ngôn ngữ chưa xong giọng gần lượt render nhất (không lấy lock: gọi trong lock của tasks)"""
+        """Ngôn ngữ GPU thuê được đọc bù: paid_langs ngôn ngữ render sắp làm tới, bỏ ngôn ngữ đã xong giọng
+        (không lấy lock: gọi trong lock của tasks)"""
+        n = paid_langs or PAID_LANGS
+        if upcoming:
+            return [l for l in list(upcoming())[:n] if l not in done_langs]
         langs = sorted(list(jobs), key=lambda l: order.get(l, 10 ** 6))
-        return [l for l in langs if l not in done_langs][:paid_langs or PAID_LANGS]
+        return [l for l in langs if l not in done_langs][:n]
 
     def fleet_take(task, age) -> bool:
         with fleet_lock:

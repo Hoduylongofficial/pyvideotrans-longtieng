@@ -1330,6 +1330,12 @@ class TtsPrefetch:
         self.offered = set()
         self.make_job = None
         self.waiting = set()  # ngôn ngữ render đang đứng chờ giọng: GPU thuê đọc giúp ngay (có GPU máy nhà)
+        self.upcoming = None  # phase_dub đặt: () -> [mã ngôn ngữ render chưa bắt đầu, theo thứ tự]
+
+    def next_up(self) -> list:
+        """Ngôn ngữ render chưa bắt đầu, theo thứ tự render; render chưa mở thì cả danh sách. GPU thuê chỉ đọc
+        bù vài ngôn ngữ đầu của danh sách này (tiến độ render, không phải tiến độ tạo giọng)."""
+        return self.upcoming() if self.upcoming else list(self.ready)
 
     def wait(self, code: str, log: Log, head: str) -> None:
         event = self.ready.get(code)
@@ -1529,7 +1535,7 @@ def start_tts_prefetch(cfg: dict, langs: list, video: Path, subs_dir: Path, fina
                            shorten_ratio=float(cfg.get('tts_shorten_ratio', 1.3) or 0),
                            # phase_dub mở render_parallel + prep_ahead tiến trình: bấy nhiêu ngôn ngữ chờ giọng cùng lúc
                            paid_langs=render_parallel(cfg) + prep_ahead(cfg),
-                           waiting=lambda: frozenset(job.waiting))
+                           waiting=lambda: frozenset(job.waiting), upcoming=job.next_up)
             done = sum(v[0] for v in res.values())
             refit = sum(v[2] for v in res.values())
             short = sum(v[4] for v in res.values() if len(v) > 4)
@@ -1739,27 +1745,48 @@ def phase_dub(cfg: dict, langs: list, video: Path, subs_dir: Path, out_dir: Path
 
     pending, pick_lock = list(todo), threading.Lock()
     ram = RamGate(log, what='chuẩn bị ngôn ngữ tiếp theo')
+    blocked = [0]   # số tiến trình render đang đứng chờ trong pick()
+    if tts:
+        tts.upcoming = lambda: [x[1]['code'] for x in list(pending)]
+
+    def mark_waiting() -> None:
+        """Gọi trong pick_lock: báo GPU (tts.waiting) các ngôn ngữ đã dịch xong mà render đang chờ giọng,
+        mỗi tiến trình đang chờ 1 ngôn ngữ, theo thứ tự render"""
+        if tts:
+            need = [x[1]['code'] for x in pending
+                    if not (translated and x[1]['code'] in translated and not translated[x[1]['code']].is_set())]
+            tts.waiting = set(need[:blocked[0]])
 
     def pick():
         """Ngôn ngữ kế tiếp: ngôn ngữ nào xong dịch + giọng trước làm trước, không chờ theo thứ tự danh sách
         (log 10/2026: giọng tiếng Đức xong lúc 02:47 nhưng phải chờ tiếng Ả Rập đứng đầu tới 02:52)."""
-        told = set()
-        while True:
-            with pick_lock:
-                if not pending:
-                    return None
-                job = next((x for x in pending if ready(x[1])), None)
-                if job:
-                    pending.remove(job)
-                    return job
-                first = pending[0]
-            code = first[1]['code']
-            if code not in told:
-                told.add(code)
-                waits = 'dịch xong' if translated and code in translated and not translated[code].is_set() \
-                    else 'tạo giọng trên GPU Modal'
-                log(f'  [{first[0]}/{len(langs)}] {code:<6} {first[1].get("name", "")} — chờ {waits}...')
-            time.sleep(2)
+        told, waited = set(), False
+        try:
+            while True:
+                with pick_lock:
+                    if not pending:
+                        return None
+                    job = next((x for x in pending if ready(x[1])), None)
+                    if job:
+                        pending.remove(job)
+                        return job
+                    if not waited:
+                        waited = True
+                        blocked[0] += 1
+                    mark_waiting()
+                    first = pending[0]
+                code = first[1]['code']
+                if code not in told:
+                    told.add(code)
+                    waits = 'dịch xong' if translated and code in translated and not translated[code].is_set() \
+                        else 'tạo giọng trên GPU Modal'
+                    log(f'  [{first[0]}/{len(langs)}] {code:<6} {first[1].get("name", "")} — chờ {waits}...')
+                time.sleep(2)
+        finally:
+            if waited:
+                with pick_lock:
+                    blocked[0] -= 1
+                    mark_waiting()
 
     def worker():
         while True:

@@ -204,7 +204,8 @@ def test_qc_report_has_audio_clip(tmp_path):
 # ---------------------------------------------------------------------------
 # Lịch render: ngôn ngữ nào sẵn sàng trước làm trước
 # ---------------------------------------------------------------------------
-def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
+def _run_phase_dub(tmp_path, monkeypatch, tts):
+    """phase_dub ar/de/es với render giả; trả về (thứ tự render, kết quả)"""
     produced, order = set(), []
     monkeypatch.setattr(dub_all, 'find_final_video', lambda final_dir, lang, stem: None)
     monkeypatch.setattr(dub_all, 'find_output_video',
@@ -227,11 +228,6 @@ def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
     subs.mkdir()
     for code in ('ar', 'de', 'es'):
         (subs / f'{code}.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nx\n', encoding='utf-8')
-    tts = dub_all.TtsPrefetch()
-    tts.ready = {c: threading.Event() for c in ('ar', 'de', 'es')}
-    tts.ready['de'].set()
-    threading.Timer(1.0, tts.ready['ar'].set).start()
-    threading.Timer(2.0, tts.ready['es'].set).start()
     langs = [{'code': c, 'name': c, 'voice': 'v'} for c in ('ar', 'de', 'es')]
     style = tmp_path / 'styles'
     style.mkdir()
@@ -239,8 +235,35 @@ def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
     cfg = {'tts_type': dub_all.OMNIVOICE_TTS, 'cleanup_out': False}
     res = dub_all.phase_dub(cfg, langs, tmp_path / 'v.mp4', subs, tmp_path / 'out', tmp_path / 'final',
                             style, lambda *a: None, tmp_path / 'logs', tts=tts)
+    return order, res
+
+
+def _tts_ar_de_es():
+    tts = dub_all.TtsPrefetch()
+    tts.ready = {c: threading.Event() for c in ('ar', 'de', 'es')}
+    tts.ready['de'].set()
+    threading.Timer(1.0, tts.ready['ar'].set).start()
+    threading.Timer(2.0, tts.ready['es'].set).start()
+    return tts
+
+
+def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
+    order, res = _run_phase_dub(tmp_path, monkeypatch, _tts_ar_de_es())
     assert order == ['de', 'ar', 'es']
     assert res == {'de': 'ok', 'ar': 'ok', 'es': 'ok'}
+
+
+def test_phase_dub_tells_gpu_render_progress_and_waiting(tmp_path, monkeypatch):
+    """GPU thuê đọc bù theo tiến độ render: phase_dub báo ngôn ngữ chưa render và ngôn ngữ đang chờ giọng"""
+    tts = _tts_ar_de_es()
+    assert tts.next_up() == ['ar', 'de', 'es']                 # render chưa mở: cả danh sách
+    seen = []
+    threading.Timer(0.6, lambda: seen.append((tts.next_up(), set(tts.waiting)))).start()
+    _run_phase_dub(tmp_path, monkeypatch, tts)
+    up, waiting = seen[0]
+    assert up == ['ar', 'es']                                  # de đã render, ar + es chưa
+    assert waiting == {'ar', 'es'}                             # 2 tiến trình (render 1 + chuẩn bị trước 1) đều chờ
+    assert tts.next_up() == [] and tts.waiting == set()
 
 
 def test_shorten_ai_call_does_not_block_gpu(tmp_path, monkeypatch):

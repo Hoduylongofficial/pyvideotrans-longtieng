@@ -220,6 +220,21 @@ def test_prefetch_paid_langs_follows_render_slots(monkeypatch, tmp_path):
     assert set(got['modal']) == {'de', 'fr', 'it', 'es'}
 
 
+def test_prefetch_paid_gpu_follows_render_progress(monkeypatch, tmp_path):
+    monkeypatch.setattr(om, 'PAID_AFTER_S', 0.2)
+    # render đã qua de, fr; sắp làm tới es -> GPU thuê chỉ đọc bù es dù de / fr chưa xong giọng
+    got, _ = _prefetch_env(monkeypatch, tmp_path, online=1, fleet_delay=0.4, paid_langs=1,
+                           upcoming=lambda: ['es', 'it'])
+    assert got['modal'] and set(got['modal']) == {'es'}
+
+
+def test_prefetch_paid_gpu_idle_when_render_behind(monkeypatch, tmp_path):
+    monkeypatch.setattr(om, 'PAID_AFTER_S', 0.05)
+    # 2 ngôn ngữ sắp render tiếp theo đều chưa có trong lượt tạo giọng này (đã xong giọng từ trước)
+    got, _ = _prefetch_env(monkeypatch, tmp_path, online=1, fleet_delay=0.1, upcoming=lambda: ['ja', 'ko'])
+    assert not got['modal'] and len(got['fleet']) == 12
+
+
 def test_without_fleet_config_behaves_as_before(monkeypatch, tmp_path):
     monkeypatch.setattr(om, 'fleet_configured', lambda: False)
     got, logs = _prefetch_env(monkeypatch, tmp_path, online=5)
