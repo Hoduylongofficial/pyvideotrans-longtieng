@@ -1,6 +1,6 @@
 # OmniVoice 远程配音：调用部署在 Modal GPU 上的服务（modal_tts/omnivoice_modal.py）
 # params.json: omnivoice_modal_url / omnivoice_modal_key 已设置时，OmniVoice 渠道不再本地运行
-# 可选固定参考音色：omnivoice_ref_wav + omnivoice_ref_text（空则服务端用 Whisper 自动识别）
+# 可选固定参考音色：omnivoice_ref_wav + omnivoice_ref_text（空则 Modal 上的 Whisper 识别一次并缓存，见 _heard_ref_text）
 #
 # 预生成仓库：环境变量 PYVIDEOTRANS_OMNIVOICE_STORE 指向一个目录时，合成结果按
 # (语言, 参考音色, 文本) 存成 FLAC。dub_all 先用 prefetch() 以高并发把所有语言的配音
@@ -102,7 +102,41 @@ def fixed_ref():
     p = Path(wav) if Path(wav).is_absolute() else Path(ROOT_DIR) / wav
     if not p.is_file():
         raise FileNotFoundError(f'OmniVoice: không thấy file giọng mẫu {p}')
-    return str(p), str(params.get('omnivoice_ref_text', '') or '').strip()
+    text = str(params.get('omnivoice_ref_text', '') or '').strip()
+    return str(p), text or _heard_ref_text(p)
+
+
+_heard_lock = threading.Lock()
+
+
+def _heard_ref_text(path: Path) -> str:
+    """Giọng mẫu cố định bỏ trống lời: Whisper trên Modal nghe 1 lần, lưu cạnh file giọng mẫu (khoá theo md5,
+    thay file thì nghe lại). Gửi kèm lời thì GPU khỏi tự nghe mỗi lượt và máy nhà GPU Fleet đọc được ngay.
+    Không nghe được thì trả '' (Modal / máy nhà vẫn tự nghe)."""
+    cache = path.with_name(path.stem + '.loi_tu_nghe.txt')
+    md5 = hashlib.md5(path.read_bytes()).hexdigest()
+    with _heard_lock:
+        try:
+            head, _, text = cache.read_text(encoding='utf-8').partition('\n')
+            if head == md5 and text.strip():
+                return text.strip()
+        except OSError:
+            pass
+        if not remote_configured() or modal_paused():
+            return ''
+        url, key = str(params['omnivoice_modal_url']).strip(), str(params['omnivoice_modal_key']).strip()
+        try:
+            r = requests.post(url.rstrip('/') + '/asr', json={'items': [{'audio': _encode_ref(str(path))}]},
+                              headers={'Authorization': f'Bearer {key}'}, timeout=600)
+            r.raise_for_status()
+            text = str(r.json()['texts'][0] or '').strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'OmniVoice: không nghe được lời giọng mẫu {path.name} ({e}), gửi trống để GPU tự nghe')
+            return ''
+        if text:
+            cache.write_text(f'{md5}\n{text}', encoding='utf-8')
+            logger.info(f'OmniVoice: lời giọng mẫu {path.name} (Whisper tự nghe): {text}')
+        return text
 
 
 def _encode_ref(path: str) -> str:

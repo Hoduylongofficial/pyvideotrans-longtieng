@@ -123,7 +123,7 @@ Bấm đúp `DOI_TTS.bat` (đóng `LONG_TIENG` trước):
   mỗi câu). Video 6 phút (98 câu) × 25 ngôn ngữ ≈ **1 USD**; video 20 phút (~330 câu) ≈ **3–3,5 USD**,
   cộng thêm ~5–20% cho các câu đọc lại cho vừa khung. Gói Starter của Modal cho 30 USD/tháng.
 - Giọng mẫu **cố định** cho giọng đều và chuẩn nhất: file 5-15 giây, 1 người nói, không
-  nhạc nền. Nên gõ đúng lời trong file (bỏ trống thì server tự nghe ra lời).
+  nhạc nền. Nên gõ đúng lời trong file (bỏ trống thì Whisper trên GPU Modal nghe ra lời 1 lần, lưu ở f5-tts/giong_mau_omnivoice.loi_tu_nghe.txt).
 - Nhái **từng câu** thì giống người nói gốc nhất, nhưng câu gốc nào lẫn nhạc/tiếng ồn thì
   câu lồng tiếng đó cũng kém theo — nên bật `is_separate` (mặc định đang bật).
 - Key là mật khẩu dùng GPU trả tiền: chỉ gửi riêng cho nhân viên, không đăng nhóm chung.

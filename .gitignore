@@ -74,3 +74,6 @@ update_token.txt
 *.capnhat
 pyvideotrans-longtieng*.zip
 _dich_thu/
+
+# Lời giọng mẫu cố định do Whisper tự nghe (_omnivoice_modal._heard_ref_text)
+f5-tts/*.loi_tu_nghe.txt

@@ -163,9 +163,20 @@ def choose_ref() -> None:
         return
     tmp.replace(dest)
     print(f'   Gõ CHÍNH XÁC lời nói trong {length:.1f} giây đầu đó (giúp nhái giọng chuẩn hơn).')
-    text = ask('   Enter để bỏ trống — server tự nghe ra lời (lần đầu chậm thêm ~1 phút): ')
+    text = ask('   Enter để bỏ trống — Whisper trên GPU Modal nghe ra lời ngay bây giờ (~1 phút): ')
     save_params(omnivoice_ref_wav=f'f5-tts/{REF_FILE}', omnivoice_ref_text=text)
     print(f'   Đã lưu giọng mẫu: {dest}')
+    if not text.strip():
+        sys.path.insert(0, str(ROOT_DIR))
+        from videotrans.tts import _omnivoice_modal as om
+        om.params.getset_params()   # đọc lại params.json vừa lưu
+        print('   Đang nhờ Whisper nghe lời giọng mẫu...')
+        heard = om.fixed_ref()[1]
+        if heard:
+            print(f'   Whisper nghe được: "{heard}"')
+            print('   Sai nhiều thì chạy lại mục này và gõ lời bằng tay.')
+        else:
+            print('   Chưa nghe được (chưa có URL + key Modal ở mục 2?). Lúc lồng tiếng sẽ thử lại.')
 
 
 def trial() -> None:
