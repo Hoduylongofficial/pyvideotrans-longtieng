@@ -153,7 +153,9 @@ def test_fleet_online_counts_ready_and_working_and_caches(monkeypatch, tmp_path)
 # ---------------------------------------------------------------------------
 # prefetch(): chia lô giữa máy nhà và GPU thuê
 # ---------------------------------------------------------------------------
-def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0, **kwargs):
+def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0, fleet_fail=None, render_follows=False, **kwargs):
+    """render_follows: render làm ngôn ngữ ngay khi xong giọng (upcoming = ngôn ngữ chưa xong giọng);
+    fleet_fail: ngôn ngữ mà máy nhà luôn báo lỗi"""
     ref = tmp_path / 'ref.wav'
     sf.write(str(ref), np.zeros(om.SR, dtype=np.float32), om.SR)
     monkeypatch.setattr(om, 'fixed_ref', lambda: (str(ref), 'ref'))
@@ -167,6 +169,8 @@ def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0, **kwargs):
     def fleet(body, urgent=None):
         if fleet_delay:
             time.sleep(fleet_delay)
+        if body['items'][0]['language'] == fleet_fail:
+            raise om.FleetError('máy nhà mất mạng')
         with lock:
             got['fleet'].append(body['items'][0]['language'])
         return {'audios': [audio] * len(body['items']), 'provider': 'fleet'}
@@ -180,6 +184,8 @@ def _prefetch_env(monkeypatch, tmp_path, online, fleet_delay=0.0, **kwargs):
     monkeypatch.setattr(om, '_post', modal)
     jobs = {lang: [f'{lang} câu {i}' for i in range(70)] for lang in ('de', 'fr', 'it', 'es')}   # 3 lô / ngôn ngữ
     logs, ready = [], []
+    if render_follows:
+        kwargs['upcoming'] = lambda: [lang for lang in jobs if lang not in ready]
     res = om.prefetch(tmp_path / 'store', jobs, parallel=2, log=logs.append, on_ready=ready.append, **kwargs)
     assert sorted(ready) == sorted(jobs) and all(v[0] == 70 for v in res.values())
     return got, logs
@@ -233,6 +239,22 @@ def test_prefetch_paid_gpu_idle_when_render_behind(monkeypatch, tmp_path):
     # 2 ngôn ngữ sắp render tiếp theo đều chưa có trong lượt tạo giọng này (đã xong giọng từ trước)
     got, _ = _prefetch_env(monkeypatch, tmp_path, online=1, fleet_delay=0.1, upcoming=lambda: ['ja', 'ko'])
     assert not got['modal'] and len(got['fleet']) == 12
+
+
+def test_prefetch_home_gpu_offline_paid_still_follows_render(monkeypatch, tmp_path):
+    # Máy nhà tạm 0 máy (chủ máy chơi game): GPU thuê đọc từng ngôn ngữ render sắp cần, không đọc trước cả loạt
+    got, logs = _prefetch_env(monkeypatch, tmp_path, online=0, paid_langs=1, render_follows=True)
+    assert not got['fleet'] and got['modal'] == ['de'] * 3 + ['fr'] * 3 + ['it'] * 3 + ['es'] * 3
+    assert any('Máy nhà: 1 lần không máy nào nhận việc' in l for l in logs)
+
+
+def test_prefetch_logs_why_paid_gpu_read_for_home_gpu(monkeypatch, tmp_path):
+    monkeypatch.setattr(om, 'PAID_AFTER_S', 100)
+    got, logs = _prefetch_env(monkeypatch, tmp_path, online=2, fleet_fail='it')
+    assert got['modal'] == ['it'] * 3 and len(got['fleet']) == 9
+    line = next(l for l in logs if l.startswith('  Máy nhà: '))
+    assert '3 lô lỗi (GPU thuê đọc thay 70 câu; gần nhất: máy nhà mất mạng)' in line
+    assert 'không máy nào' not in line
 
 
 def test_without_fleet_config_behaves_as_before(monkeypatch, tmp_path):

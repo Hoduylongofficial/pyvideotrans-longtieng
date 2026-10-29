@@ -437,18 +437,20 @@ def _post_fleet(body: dict, urgent=None) -> dict:
 
 def _post_shared(url: str, key: str, body: dict, urgent=None) -> dict:
     """Máy nhà đọc trước; câu máy nhà lỗi / bỏ dở thì GPU thuê (_post) đọc nốt. Trả về như _post, thêm
-    'lines' = {nơi đọc: số câu}."""
+    'lines' = {nơi đọc: số câu} và 'fleet_miss' = (lý do, chi tiết) khi GPU thuê phải đọc thay."""
     items = body.get('items') or []
+    why = None
     try:
         audios = _post_fleet(body, urgent)['audios']
     except FleetSlow as e:   # máy nhà vẫn chạy, lô sau vẫn gửi máy nhà
-        audios = list(e.audios)
+        audios, why = list(e.audios), ('chậm lúc render đang chờ', str(e))
         logger.info(f'GPU Fleet: {e} -> GPU thuê đọc nốt')
     except Exception as e:  # noqa: BLE001 - máy nhà lỗi gì cũng không được làm hỏng lượt đọc
-        audios = list(getattr(e, 'audios', []))
+        audios, why = list(getattr(e, 'audios', [])), ('lỗi', str(e))
         logger.warning(f'GPU Fleet: {e} -> GPU thuê đọc nốt')
         # Máy tắt đột ngột thì server còn báo online thêm một lúc: coi như 0 máy trong FLEET_STATS_TTL giây
-        # để lô sau đi thẳng GPU thuê, không lô nào phải chờ treo FLEET_STALL_S nữa
+        # để lô sau không gửi máy nhà rồi phải chờ treo FLEET_STALL_S nữa (GPU thuê vẫn chỉ đọc bù ngôn ngữ
+        # sắp render)
         with _fleet_lock:
             _fleet_stats.update(at=time.time(), online=0)
     audios = (audios + [''] * len(items))[:len(items)]
@@ -456,6 +458,7 @@ def _post_shared(url: str, key: str, body: dict, urgent=None) -> dict:
     out = {'audios': audios, 'provider': 'fleet', 'lines': lines}
     miss = [i for i, (it, a) in enumerate(zip(items, audios)) if not a and str(it.get('text', '')).strip()]
     if miss:
+        out['fleet_miss'] = why or ('câu đọc lỗi', '')
         paid = _post(url, key, dict(body, items=[items[i] for i in miss]))
         for i, a in zip(miss, paid.get('audios', [])):
             audios[i] = a or ''
@@ -702,6 +705,8 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
     lane = threading.local()        # lane.fleet: luồng này gửi máy nhà trước (False = GPU thuê)
     fleet_lock, fleet_busy = threading.Lock(), [0]   # số lô đang ở máy nhà
     used = {}                       # nơi đọc -> số câu
+    misses = {}                     # lý do GPU thuê đọc thay máy nhà -> [số lô, số câu, chi tiết gần nhất]
+    offline = {'since': None, 'times': 0, 'seconds': 0.0}   # lúc không máy nhà nào nhận việc
     seq = iter(range(10 ** 9))
     left = {}                       # 语言 -> 未完成的任务数
     phase, rounds = {}, {}
@@ -725,8 +730,15 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         else:
             data = _post(url, key, body)
         with lock:
-            for where, n in (data.get('lines') or {data.get('provider', 'modal'): len(items)}).items():
+            lines = data.get('lines') or {data.get('provider', 'modal'): len(items)}
+            for where, n in lines.items():
                 used[where] = used.get(where, 0) + n
+            if 'fleet_miss' in data:
+                why, detail = data['fleet_miss']
+                ev = misses.setdefault(why, [0, 0, ''])
+                ev[0] += 1
+                ev[1] += sum(n for where, n in lines.items() if where != 'fleet')
+                ev[2] = detail or ev[2]
         return data
 
     def outputs(lang, texts, data):
@@ -995,13 +1007,25 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
             return True
 
     def paid_take(task, age) -> bool:
-        # Máy nhà đang có máy online: GPU thuê chỉ nhận lô của ngôn ngữ render đang chờ, hoặc lô đã chờ lâu
-        # của ngôn ngữ sắp render
+        # Đã cài máy nhà: GPU thuê chỉ nhận lô của ngôn ngữ render đang chờ, hoặc lô của ngôn ngữ sắp render
+        # (đã chờ lâu mà máy nhà chưa nhận, hoặc lúc này không máy nhà nào online). Kể cả lúc máy nhà tạm 0 máy
+        # (chủ máy chơi game, máy nhà lỗi) cũng không đọc trước cả loạt: log 27/10 RunPod đọc 77% số câu vì thế,
+        # phần lẽ ra máy nhà đọc miễn phí khi online lại
         if waiting and task[3] in waiting():
             return True
-        return age >= PAID_AFTER_S and task[3] in next_langs()
+        return (age >= PAID_AFTER_S or not fleet_cap[0]) and task[3] in next_langs()
 
     fleet_cap = [0]                 # số máy nhà online lúc này (fleet_online() gọi ngoài lock của tasks)
+
+    def note_online(n: int) -> None:
+        with lock:
+            now = time.time()
+            if n <= 0 and offline['since'] is None:
+                offline['since'] = now
+                offline['times'] += 1
+            elif n > 0 and offline['since'] is not None:
+                offline['seconds'] += now - offline['since']
+                offline['since'] = None
 
     def worker(fleet=False):
         lane.fleet = fleet
@@ -1009,7 +1033,8 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
             accept = None
             if use_fleet:
                 fleet_cap[0] = fleet_online()
-                accept = fleet_take if fleet else (paid_take if fleet_cap[0] else None)
+                note_online(fleet_cap[0])
+                accept = fleet_take if fleet else paid_take
             elif fleet:
                 return
             try:
@@ -1071,4 +1096,15 @@ def prefetch(store: Path, jobs: dict, parallel: int = 4, log=print, native: set 
         saved = used.get('fleet', 0) * PAID_COST_PER_LINE
         log('  Câu đã đọc theo GPU: ' + ', '.join(f'{PROVIDER_NAMES.get(k, k)} {v}' for k, v in used.items())
             + (f' (máy nhà đỡ ~${saved:.2f} tiền GPU thuê)' if saved else ''))
+    if use_fleet:
+        note_online(1)   # chốt khoảng 0 máy đang mở
+        notes = []
+        if offline['times']:
+            s = int(offline['seconds'])
+            notes.append(f'{offline["times"]} lần không máy nào nhận việc (tổng {s // 60}m{s % 60:02d}s)')
+        for why, (n, lines, detail) in misses.items():
+            notes.append(f'{n} lô {why} (GPU thuê đọc thay {lines} câu' + (f'; gần nhất: {detail[:160]}' if detail else '')
+                         + ')')
+        if notes:
+            log('  Máy nhà: ' + ', '.join(notes))
     return {k: tuple(v) for k, v in result.items()}

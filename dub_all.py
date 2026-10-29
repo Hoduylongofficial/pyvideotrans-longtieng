@@ -270,6 +270,25 @@ def find_output_video(folder: Path, stem: str) -> Path | None:
     return None
 
 
+def code_version() -> str:
+    """Bản code đang chạy, ghi vào đầu dub_all.log để đọc log biết máy đã cập nhật chưa: commit trong .phienban
+    (CAP_NHAT.bat ghi) hoặc commit git (máy dev); '' nếu không biết."""
+    f = ROOT_DIR / '.phienban'
+    try:
+        sha = f.read_text(encoding='utf-8').strip() if f.is_file() else ''
+        if sha:
+            return f'{sha[:7]} (cập nhật lúc {time.strftime("%d/%m %H:%M", time.localtime(f.stat().st_mtime))})'
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(['git', '-C', str(ROOT_DIR), 'log', '-1', '--format=%h (commit %cd)',
+                            '--date=format:%d/%m %H:%M'], capture_output=True, text=True, encoding='utf-8',
+                           timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ''
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
 def final_stem(lang: dict, video_stem: str) -> str:
     """Tên file thành phẩm: 'Tây Ban Nha (es) - ten video'. Kèm mã để đối chiếu subs/."""
     name = lang.get('name') or lang['code']
@@ -2295,6 +2314,7 @@ def main() -> int:
         log(f'  Video gốc  : {"nhúng phụ đề " + source_language if with_original else "không làm"}')
         tts_type = int(cfg.get('tts_type', EDGE_TTS))
         log(f'  Giọng đọc  : {TTS_LABELS.get(tts_type, f"tts_type={tts_type}")}')
+        log(f'  Bản code   : {code_version() or "không rõ"}')
         log('=' * 70)
         bao_cao_telegram.report_interrupted(cfg, workdir, previous_run, log)
 

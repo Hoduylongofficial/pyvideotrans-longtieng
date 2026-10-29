@@ -253,6 +253,12 @@ def test_phase_dub_renders_in_ready_order(tmp_path, monkeypatch):
     assert res == {'de': 'ok', 'ar': 'ok', 'es': 'ok'}
 
 
+def test_code_version_from_update_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(dub_all, 'ROOT_DIR', tmp_path)
+    (tmp_path / '.phienban').write_text('8c9e996557b4af0378937454597a6002f2780600\n', encoding='utf-8')
+    assert dub_all.code_version().startswith('8c9e996 (cập nhật lúc ')
+
+
 def test_phase_dub_tells_gpu_render_progress_and_waiting(tmp_path, monkeypatch):
     """GPU thuê đọc bù theo tiến độ render: phase_dub báo ngôn ngữ chưa render và ngôn ngữ đang chờ giọng"""
     tts = _tts_ar_de_es()
