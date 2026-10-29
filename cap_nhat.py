@@ -11,6 +11,9 @@ Chỉ dùng thư viện chuẩn của Python, không cần cài Git.
      mà máy này đã chọn bằng DOI_MODEL.bat.
   3. Xoá các file đã bị xoá trên GitHub.
   4. Nếu thư viện thay đổi (pyproject.toml / uv.lock) thì chạy uv sync.
+
+cap_nhat.py --tu-dong: LONG_TIENG.bat / MO_PHAN_MEM.bat gọi mỗi lần mở. Có bản mới thì cập nhật luôn,
+không hỏi gì; mất mạng, GitHub lỗi, đang có cửa sổ khác chạy... thì chỉ báo 1 dòng rồi chạy tiếp bản cũ.
 """
 import hashlib
 import io
@@ -119,16 +122,28 @@ def github(url: str, token: str, raw: bool = False):
     return data if raw else json.loads(data)
 
 
-def latest_commit() -> tuple:
+def latest_commit(interactive: bool = True) -> tuple:
     """(commit mới nhất, token dùng được). Repo public thì không cần token."""
     url = f'{API}/commits/{BRANCH}'
     for token in dict.fromkeys([saved_token(), '']):
         try:
             return github(url, token), token
         except AuthError:
-            pass
+            if not interactive and token == '':
+                raise
     token = ask_token()
     return github(url, token), token
+
+
+def latest_sha_quick() -> str:
+    """Commit mới nhất của nhánh main qua giao thức git (như "git ls-remote"): nhanh và không tính vào
+    giới hạn 60 lượt/giờ của GitHub API, vì cả văn phòng chung 1 IP mà lần mở nào cũng kiểm tra."""
+    url = f'https://github.com/{REPO}.git/info/refs?service=git-upload-pack'
+    req = urllib.request.Request(url, headers={'User-Agent': 'git/2.0 pyvideotrans-longtieng-updater'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = resp.read()
+    m = re.search(rb'([0-9a-f]{40}) refs/heads/' + re.escape(BRANCH.encode()) + rb'[\0\n]', data)
+    return m.group(1).decode() if m else ''
 
 
 def changes_since(old: str, new: str, token: str) -> tuple:
@@ -224,16 +239,79 @@ def uv_sync() -> None:
         raise UpdateError('uv sync lỗi. Kiểm tra mạng rồi chạy lại CAP_NHAT.bat.')
 
 
-def main() -> int:
-    print()
-    print('=' * 62)
-    print('   CẬP NHẬT BỘ LỒNG TIẾNG')
-    print('=' * 62)
+def current_sha() -> str:
+    return VERSION_FILE.read_text(encoding='utf-8').strip() if VERSION_FILE.exists() else ''
+
+
+def busy_processes() -> int:
+    """Số chương trình khác đang chạy từ thư mục này (python của .venv, ffmpeg...): đang lồng tiếng / mở phần mềm
+    thì không thay code dưới chân nó. Không tính chính mình và trình khởi động .venv\\Scripts\\python.exe của mình."""
+    if sys.platform != 'win32':
+        return 0
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD))
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    pids = (wintypes.DWORD * 8192)()
+    size = wintypes.DWORD()
+    if not k32.K32EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(size)):
+        return 0
+    mine = {0, os.getpid(), os.getppid()}
+    root = str(ROOT_DIR).lower().rstrip('\\') + '\\'
+    buf = ctypes.create_unicode_buffer(1024)
+    busy = 0
+    for pid in pids[:size.value // ctypes.sizeof(wintypes.DWORD)]:
+        if pid in mine:
+            continue
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            continue
+        try:
+            n = wintypes.DWORD(len(buf))
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) and buf.value.lower().startswith(root):
+                busy += 1
+        finally:
+            k32.CloseHandle(h)
+    return busy
+
+
+def auto_update() -> int:
+    """Gọi mỗi lần mở LONG_TIENG / MO_PHAN_MEM. Luôn trả 0: cập nhật hỏng thì vẫn chạy bản đang có."""
+    if (ROOT_DIR / '.git').exists():
+        return 0  # máy dev: code do git quản lý, không chép đè zip lên
+    try:
+        new_sha = latest_sha_quick()
+    except (OSError, ValueError) as e:
+        print(f'   [!] Không kiểm tra được bản mới ({getattr(e, "reason", e)}). Chạy bản hiện tại.')
+        return 0
+    if not new_sha or new_sha == current_sha():
+        print(f'   Đang là bản mới nhất ({new_sha[:7] or "?"}).')
+        return 0
+    print('\n   CÓ BẢN MỚI — tự cập nhật trước khi chạy')
+    if busy_processes():
+        print('   [!] Có bản mới nhưng đang có cửa sổ lồng tiếng / phần mềm khác chạy.')
+        print('       Tắt hết rồi mở lại để tự cập nhật (hoặc bấm CAP_NHAT.bat).')
+        return 0
+    try:
+        ok = update(interactive=False) == 0
+    except Exception as e:  # noqa: BLE001 - cập nhật hỏng không được chặn việc lồng tiếng
+        print(f'\n   [LỖI] {e!r}')
+        ok = False
+    if not ok:
+        print('   [!] Tự cập nhật không xong, chạy bản hiện tại. Lần mở sau sẽ thử lại.')
+    return 0
+
+
+def update(interactive: bool = True) -> int:
     try:
         print('   Đang kiểm tra bản mới trên GitHub...')
-        latest, token = latest_commit()
+        latest, token = latest_commit(interactive)
         new_sha = latest['sha']
-        old_sha = VERSION_FILE.read_text(encoding='utf-8').strip() if VERSION_FILE.exists() else ''
+        old_sha = current_sha()
         if old_sha == new_sha:
             print(f'\n   Đang là bản mới nhất ({new_sha[:7]}). Không cần cập nhật.')
             return 0
@@ -274,6 +352,16 @@ def main() -> int:
     except UpdateError as e:
         print(f'\n   [LỖI] {e}')
         return 1
+
+
+def main() -> int:
+    if '--tu-dong' in sys.argv[1:]:
+        return auto_update()
+    print()
+    print('=' * 62)
+    print('   CẬP NHẬT BỘ LỒNG TIẾNG')
+    print('=' * 62)
+    return update()
 
 
 if __name__ == '__main__':

@@ -189,9 +189,15 @@ hàng, thời gian xếp hàng **không tính tiền**, chỉ chậm hơn.
 (vd đổi `GPU = 'L4'`, `max_containers`) thì chạy lại mục 5. Xem chi phí:
 https://modal.com/apps/hoduylongofficial/main/deployed/omnivoice-tts
 
-### 1.5c Cập nhật bản mới: `CAP_NHAT.bat`
+### 1.5c Cập nhật bản mới: tự động (hoặc `CAP_NHAT.bat`)
 
-Đóng `MO_PHAN_MEM` / `LONG_TIENG`, bấm đúp `CAP_NHAT.bat`. Nó tải bản mới nhất từ repo
+Mỗi lần mở `LONG_TIENG.bat` / `MO_PHAN_MEM.bat` sẽ tự kiểm tra GitHub (1–2 giây), có bản
+mới thì cập nhật luôn rồi mới chạy, không hỏi gì. Bỏ qua (chạy bản đang có, lần mở sau
+thử lại) khi: mất mạng / GitHub lỗi, hoặc đang có cửa sổ lồng tiếng / phần mềm khác chạy
+từ cùng thư mục (không thay code dưới chân việc đang làm). Máy có thư mục `.git` (máy
+quản trị) không bao giờ tự cập nhật.
+
+Muốn cập nhật ngay bằng tay: đóng `MO_PHAN_MEM` / `LONG_TIENG`, bấm đúp `CAP_NHAT.bat`. Nó tải bản mới nhất từ repo
 GitHub `Hoduylongofficial/pyvideotrans-longtieng` (public, không cần đăng nhập hay
 token), chỉ ghi đè code, **giữ nguyên** API key (`videotrans/params.json`),
 `videotrans/cfg.json`, kênh dịch + số dịch song song + giọng đọc đã chọn trong
@@ -203,8 +209,8 @@ token), chỉ ghi đè code, **giữ nguyên** API key (`videotrans/params.json`
   `update_token.txt`). Token tạo ở github.com → Settings → Developer settings →
   Fine-grained tokens → *Only select repositories*: `pyvideotrans-longtieng` →
   *Permissions*: **Contents: Read-only**.
-- Quản lý sửa code xong chỉ cần commit + `git push origin main`; nhân viên bấm
-  `CAP_NHAT.bat` là có. Dòng đầu của commit message hiện ra cho nhân viên đọc.
+- Quản lý sửa code xong chỉ cần commit + `git push origin main`; nhân viên mở lại
+  `LONG_TIENG.bat` là có. Dòng đầu của commit message hiện ra cho nhân viên đọc.
 
 ### 1.6 Dự phòng: DeepSeek chính chủ (khi hết tiền OpenRouter)
 
