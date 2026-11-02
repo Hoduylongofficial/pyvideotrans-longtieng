@@ -72,6 +72,14 @@ CLI_PY = ROOT_DIR / 'cli.py'
 DEFAULT_CONFIG = ROOT_DIR / 'dub_all.config.json'
 EDGE_VOICE_JSON = ROOT_DIR / 'videotrans' / 'voicejson' / 'edge_tts.json'
 PARAMS_JSON = ROOT_DIR / 'videotrans' / 'params.json'
+CFG_JSON = ROOT_DIR / 'videotrans' / 'cfg.json'
+
+# Chuỗi model 9Router chung cho mọi máy (model trước lỗi / hết quota thì dùng model sau). Đổi chuỗi thì tăng
+# NINEROUTER_CHAIN_REV: lần chạy kế tiếp trên mỗi máy tự áp dụng 1 lần; sau đó ai đổi bằng DOI_MODEL thì máy đó
+# giữ lựa chọn riêng tới lần tăng REV sau. 11/2026: thử 4 bản DeepSeek V4.1 Flash trên 25 ngôn ngữ, 1017 tự nhiên nhất.
+NINEROUTER_CHAIN = ('ag/claude-opus-4-6-thinking,openrouter/deepseek/deepseek-v4.1-flash-1017,'
+                    'DeepSeek-V4.1-Flash/deepseek-ai/DeepSeek-V4.1-Flash-1017')
+NINEROUTER_CHAIN_REV = 1
 
 EDGE_TTS = 0
 OMNIVOICE_TTS = 3
@@ -287,6 +295,38 @@ def code_version() -> str:
         return r.stdout.strip() if r.returncode == 0 else ''
     except (OSError, subprocess.SubprocessError):
         return ''
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def apply_ninerouter_chain() -> str:
+    """Máy chưa nhận NINEROUTER_CHAIN_REV hiện tại (và có dùng 9Router) -> ghi NINEROUTER_CHAIN vào params.json,
+    đưa các model đó lên đầu danh sách trong cfg.json (giao diện / DOI_MODEL lấy danh sách ở đây).
+    Trả về chuỗi vừa áp, '' nếu không đổi gì."""
+    try:
+        params = json.loads(PARAMS_JSON.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return ''
+    if int(params.get('ninerouter_chain_rev') or 0) >= NINEROUTER_CHAIN_REV \
+            or not str(params.get('ninerouter_key', '')).strip():
+        return ''
+    params['ninerouter_model'] = NINEROUTER_CHAIN
+    params['ninerouter_chain_rev'] = NINEROUTER_CHAIN_REV
+    _write_json_atomic(PARAMS_JSON, params)
+    try:
+        cfg = json.loads(CFG_JSON.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        cfg = None
+    if cfg:
+        chain = NINEROUTER_CHAIN.split(',')
+        others = [m.strip() for m in str(cfg.get('ninerouter_model', '')).split(',') if m.strip()]
+        cfg['ninerouter_model'] = ','.join(chain + [m for m in others if m not in chain])
+        _write_json_atomic(CFG_JSON, cfg)
+    return NINEROUTER_CHAIN
 
 
 def final_stem(lang: dict, video_stem: str) -> str:
@@ -2322,6 +2362,9 @@ def main() -> int:
         log('[0/2] Kiểm tra cấu hình...')
         validate(cfg, langs, video, srt, log)
         log('  OK')
+        chain = apply_ninerouter_chain()
+        if chain:
+            log(f'  Chuỗi model 9Router đổi theo bản mới: {chain}')
         # Ngôn ngữ đổi số -> chữ trước khi đọc (chỉ chữ gửi cho OmniVoice, phụ đề giữ nguyên). Đặt vào
         # môi trường để cả tạo giọng trước (máy này) lẫn tiến trình lồng tiếng (cli.py) dùng chung.
         from videotrans.tts._dub_text import SPEAK_ENV, SPELL_ENV
