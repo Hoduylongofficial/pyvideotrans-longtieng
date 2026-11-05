@@ -343,6 +343,8 @@ pynini = [
 
 
 #faster-whisper = { url = "https://github.com/SYSTRAN/faster-whisper/archive/refs/heads/master.tar.gz" }
-chatterbox-tts = { url = "https://github.com/resemble-ai/chatterbox/archive/refs/heads/master.tar.gz" }
+# Ghim theo commit, KHÔNG dùng refs/heads/master: upstream có commit mới là hash tarball đổi,
+# uv.lock báo "Hash mismatch" và máy chưa có cache không chạy được.
+chatterbox-tts = { url = "https://github.com/resemble-ai/chatterbox/archive/5de7a54aa4e5e2baadb0182dde554908b48b85c2.tar.gz" }
 
 
