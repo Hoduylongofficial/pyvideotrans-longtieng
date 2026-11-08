@@ -87,11 +87,38 @@ def use_edge() -> None:
     print(f'\n   ĐÃ ĐỔI sang: {TTS_NAMES[EDGE_TTS]}')
 
 
+def _wait_health(url: str):
+    """GET /health, cứ 15 giây in thời gian đã chờ để người dùng biết chưa treo. Trả về status code."""
+    import threading
+    import requests
+    result = {}
+
+    def run():
+        try:
+            # Modal trả 303 sau 150 giây nếu GPU chưa bật xong; requests tự đi theo và chờ tiếp
+            result['code'] = requests.get(url.rstrip('/') + '/health', timeout=600).status_code
+        except Exception as e:  # noqa: BLE001
+            result['err'] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    started = time.time()
+    t.start()
+    while t.is_alive():
+        t.join(15)
+        if t.is_alive():
+            print(f'     ... đang chờ GPU bật ({time.time() - started:.0f} giây)', flush=True)
+    if 'err' in result:
+        raise result['err']
+    print(f'   Server trả lời sau {time.time() - started:.0f} giây.')
+    return result['code']
+
+
 def check_server(url: str, key: str) -> bool:
     import requests
-    print('   Kiểm tra server (lần đầu GPU khởi động mất ~30 giây)...')
+    print('   Kiểm tra server: GPU đang tắt thì phải bật lên, thường 1–2 phút,')
+    print('   ngay sau khi quản trị deploy lại có thể tới 5 phút. Cứ để yên chờ.')
     try:
-        if requests.get(url.rstrip('/') + '/health', timeout=300).status_code != 200:
+        if _wait_health(url) != 200:
             print('   Server không trả lời đúng. Kiểm tra lại URL.')
             return False
         r = requests.post(url.rstrip('/') + '/tts', json={'items': []}, timeout=60,
@@ -205,7 +232,7 @@ def trial() -> None:
     from videotrans.tts._omnivoice_modal import _encode_ref
     body = {'refs': {'r1': {'audio': _encode_ref(str(ref_path)), 'text': ref_text}},
             'items': [{'text': s, 'ref': 'r1', 'language': 'ro'} for s in TEST_SENTENCES]}
-    print(f'   Gửi {len(TEST_SENTENCES)} câu tiếng Romania lên GPU Modal (lần đầu GPU khởi động ~30 giây)...')
+    print(f'   Gửi {len(TEST_SENTENCES)} câu tiếng Romania lên GPU Modal (GPU đang tắt thì phải bật lên, 1–5 phút)...')
     started = time.time()
     try:
         r = requests.post(url + '/tts', json=body, timeout=900, headers={'Authorization': f'Bearer {key}'})
@@ -319,14 +346,61 @@ def use_fleet() -> None:
 
 
 # ---------------------------------------------------------------------------
+_modal_profile = ''  # tài khoản Modal được chọn ở mục 5 (rỗng = tài khoản đang active của modal CLI)
+
+
 def _modal(*args, capture=False):
     cmd = ['uvx', '--from', 'modal', 'modal', *args]
     # Khi bắt output qua pipe, Python của modal CLI mặc định ghi bằng cp1252 và chết ở ký tự '✓'
     env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
+    if _modal_profile:
+        env['MODAL_PROFILE'] = _modal_profile
     if capture:
         return subprocess.run(cmd, cwd=str(ROOT_DIR), env=env, capture_output=True, text=True,
                               encoding='utf-8', errors='replace')
     return subprocess.run(cmd, cwd=str(ROOT_DIR), env=env)
+
+
+def modal_profiles() -> tuple:
+    """(các tài khoản đã đăng nhập trong ~/.modal.toml, tài khoản đang active)."""
+    path = Path.home() / '.modal.toml'
+    names, active, cur = [], '', ''
+    if path.exists():
+        for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+            m = re.match(r'\s*\[(.+?)\]\s*$', line)
+            if m:
+                cur = m.group(1).strip().strip('"\'')
+                names.append(cur)
+            elif cur and re.match(r'\s*active\s*=\s*true\b', line):
+                active = cur
+    return names, active or (names[0] if names else '')
+
+
+def choose_modal_profile(url: str) -> bool:
+    """Máy đăng nhập nhiều tài khoản Modal thì hỏi deploy lên tài khoản nào.
+    Mặc định là tài khoản đang chạy server (theo URL đã lưu) để URL của nhân viên không đổi."""
+    global _modal_profile
+    names, active = modal_profiles()
+    m = re.match(r'https://([^.]+?)--', url)
+    current = m.group(1) if m else ''
+    default = current if current in names else active
+    if len(names) <= 1:
+        _modal_profile = default
+        return True
+    print('   Máy này đăng nhập nhiều tài khoản Modal:')
+    for i, name in enumerate(names, 1):
+        tags = [t for t, ok in (('đang chạy server', name == current), ('active', name == active)) if ok]
+        print(f'     {i}) {name}' + (f'  ({", ".join(tags)})' if tags else ''))
+    ans = ask(f'   Deploy lên tài khoản số mấy? [Enter = {default}]: ').strip()
+    if not ans:
+        _modal_profile = default
+    elif ans.isdigit() and 1 <= int(ans) <= len(names):
+        _modal_profile = names[int(ans) - 1]
+    else:
+        print('   Số không hợp lệ, huỷ.')
+        return False
+    print(f'   → Tài khoản Modal: {_modal_profile}')
+    return True
 
 
 def admin_deploy() -> None:
@@ -339,14 +413,22 @@ def admin_deploy() -> None:
         if _modal('token', 'new').returncode != 0:
             return
     url, key = remote()
-    if not key or ask_yes('   Tạo key MỚI? (key cũ trên máy nhân viên sẽ hết dùng được)', default=False):
+    if not choose_modal_profile(url):
+        return
+    new_key = not key or ask_yes('   Tạo key MỚI? (key cũ trên máy nhân viên sẽ hết dùng được)', default=False)
+    if new_key:
         key = secrets.token_urlsafe(32)
-        r = _modal('secret', 'create', '--force', MODAL_SECRET, f'OMNIVOICE_API_KEY={key}', capture=True)
-        if r.returncode != 0:
-            print('   Tạo secret THẤT BẠI:', (r.stdout + r.stderr).replace(key, '***')[-500:])
-            return
+    # Giữ key cũ vẫn ghi lại secret: tài khoản Modal khác (hoặc mới) chưa có secret thì deploy báo
+    # "Secret 'omnivoice-auth' not found". Ghi đè cùng giá trị thì không ảnh hưởng gì.
+    r = _modal('secret', 'create', '--force', MODAL_SECRET, f'OMNIVOICE_API_KEY={key}', capture=True)
+    if r.returncode != 0:
+        print('   Ghi key lên Modal THẤT BẠI:', (r.stdout + r.stderr).replace(key, '***')[-500:])
+        return
+    if new_key:
         save_params(omnivoice_modal_key=key)
         print('   Đã tạo key mới.')
+    else:
+        print('   Giữ key cũ.')
     print('   Đang deploy (lần đầu ~3 phút)...')
     r = _modal('deploy', str(MODAL_APP), capture=True)
     out = r.stdout + r.stderr
@@ -356,6 +438,9 @@ def admin_deploy() -> None:
         return
     save_params(omnivoice_modal_url=found[-1])
     print(f'\n   DEPLOY XONG. URL: {found[-1]}')
+    if url and found[-1] != url:
+        print('   [!] URL ĐÃ ĐỔI so với trước. Gửi URL mới cho nhân viên: DOI_TTS.bat → 2 → dán URL mới'
+              + (' + key mới.' if new_key else ' (key giữ nguyên, Enter để giữ).'))
     if ask_yes('   Hiện key để gửi cho nhân viên (gửi riêng, KHÔNG đăng nhóm chung)?', default=False):
         print(f'   Key: {key}')
 
