@@ -1,10 +1,21 @@
-Các bước cài trên máy nhân viên:
+Các bước cài trên máy nhân viên (chỉ làm 1 lần):
 
-Giải nén zip ra ổ đĩa (ví dụ D:\pyvideotrans-longtieng)
-Cài uv và ffmpeg — mục 1.1 và 1.2 trong HUONG_DAN_LONG_TIENG.md
-Mở PowerShell trong thư mục đó, chạy uv sync (lần đầu 10–20 phút, tải vài GB)
-Bấm đúp MO_PHAN_MEM.bat → menu kênh dịch → OpenRouter → dán key → lưu
-Từ đó dùng LONG_TIENG.bat như thường
+1. Giải nén file zip ra ổ đĩa, ví dụ D:\pyvideotrans-longtieng
+   (bấm chuột phải vào file zip > Extract All / Giải nén tất cả).
+   KHÔNG bấm chạy thẳng trong file zip.
+
+2. Bấm đúp CAI_DAT.bat trong thư mục vừa giải nén.
+   - Windows hiện "Windows protected your PC" thì bấm More info > Run anyway.
+   - File này tự cài hết: uv, ffmpeg, thư viện Python, tạo lối tắt trên Desktop.
+   - Lần đầu mất khoảng 10–20 phút, tải vài GB. Cần mạng, không cần quyền Administrator.
+   - Có lỗi (mất mạng...) thì bấm đúp lại CAI_DAT.bat, phần đã xong sẽ được bỏ qua.
+
+3. Cuối cùng file cài hỏi nhập key:
+   - Kênh dịch: gõ C, chọn số 10 (9Router), dán URL + key do quản lý gửi riêng qua Zalo.
+   - Giọng đọc: gõ C, chọn GPU Modal (số 2) / GPU máy nhà (số 7) theo URL + key quản lý gửi.
+   Chưa có key thì gõ K, sau này bấm DOI_MODEL.bat và DOI_TTS.bat để nhập.
+
+4. Từ đó bấm đúp "Long tieng 25 ngon ngu" trên Desktop (hoặc LONG_TIENG.bat) để dùng.
 
 Cập nhật khi quản lý sửa code: TỰ ĐỘNG.
 Mỗi lần mở LONG_TIENG.bat / MO_PHAN_MEM.bat sẽ tự tải bản mới (nếu có) rồi mới chạy.
@@ -12,5 +23,4 @@ Mỗi lần mở LONG_TIENG.bat / MO_PHAN_MEM.bat sẽ tự tải bản mới (n
 API key và kênh dịch đã chọn trên máy được giữ nguyên.
 
 Đổi model / thêm API key: bấm đúp DOI_MODEL.bat (xem mục 1.5b trong HUONG_DAN_LONG_TIENG.md)
-
-Lần chạy đầu tiên sẽ tự tải model tách nhạc UVR (59 MB), nên máy nhân viên cần có mạng.
+Đổi giọng đọc: bấm đúp DOI_TTS.bat (xem mục 1.5b2 trong HUONG_DAN_LONG_TIENG.md)

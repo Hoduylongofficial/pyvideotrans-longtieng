@@ -8,6 +8,11 @@ video gốc tiếng Anh chỉ nhúng phụ đề tiếng Anh** (giữ nguyên h�
 
 ## PHẦN 1 — Cài đặt (chỉ làm 1 lần)
 
+> **Cách nhanh:** giải nén zip ra ổ đĩa (vd `D:\pyvideotrans-longtieng`) rồi bấm đúp
+> **`CAI_DAT.bat`**. File này tự làm hết mục 1.1–1.4 (cài uv, ffmpeg bản đầy đủ, `uv sync`),
+> tạo lối tắt trên Desktop và cuối cùng hỏi nhập key (mục 1.5b / 1.5b2). Lỗi giữa chừng thì
+> bấm đúp lại, phần đã xong được bỏ qua. Các mục dưới đây chỉ cần khi muốn tự cài tay.
+
 ### 1.1 Cài `uv`
 
 Mở **PowerShell** rồi dán lệnh sau:
