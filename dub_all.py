@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 dub_all.py — Lồng tiếng hàng loạt nhiều ngôn ngữ từ 1 video + 1 file phụ đề gốc.
+Bấm đúp LONG_TIENG.bat (--menu): thêm nhiều video 1 lần, làm lần lượt theo hàng đợi.
 
 Chỉ cần cung cấp video và file SRT ngôn ngữ gốc, công cụ sẽ tự động:
   Pha 1  dịch phụ đề ra toàn bộ ngôn ngữ đích  (cli.py --task sts)
@@ -2191,10 +2192,12 @@ def write_report(cfg: dict, langs: list, trans_results: dict, dub_results: dict,
 SRT_EXTS = ('.srt', '.ass', '.vtt')
 
 
-def ask_path(prompt: str, valid_exts: tuple) -> Path:
+def ask_path(prompt: str, valid_exts: tuple, default: Path | None = None) -> Path:
     while True:
         raw = input(prompt).strip().strip('"').strip("'")
         if not raw:
+            if default:
+                return default
             continue
         path = Path(raw).expanduser()
         if not path.exists():
@@ -2206,69 +2209,349 @@ def ask_path(prompt: str, valid_exts: tuple) -> Path:
         return path.resolve()
 
 
-def run_menu(args, cfg: dict) -> argparse.Namespace:
-    """Hỏi video / phụ đề / việc cần làm, trả về args đã điền đủ."""
-    video = Path(args.video).resolve() if args.video else None
-    srt = Path(args.srt).resolve() if args.srt else None
+# Hàng đợi nhiều video: mỗi video chạy 1 tiến trình dub_all.py riêng, lần lượt từng cái. Mở thêm LONG_TIENG
+# trong lúc đang chạy thì cửa sổ mới chỉ xếp video vào hàng; cửa sổ đang chạy làm xong video hiện tại là lấy tiếp.
+# Video chỉ rời hàng đợi khi làm xong: đóng cửa sổ / mất điện / lỗi thì lần mở sau hỏi làm tiếp.
+QUEUE_FILE = ROOT_DIR / 'videotrans' / 'dub_queue.json'
+QUEUE_LOCK = ROOT_DIR / 'videotrans' / 'dub_queue.lock'
+RUNNER_LOCK = ROOT_DIR / 'videotrans' / 'dub_queue.running'
+# Ctrl+C giết tiến trình con trước khi Python kịp bắt: Windows trả STATUS_CONTROL_C_EXIT
+STOPPED_CODES = (130, 0xC000013A, -2)
 
-    # Nhận file kéo-thả vào file .bat, tự phân loại theo đuôi file
-    for raw in args.paths:
-        path = Path(raw.strip('"')).expanduser()
+
+def _lock_byte(fd: int, wait: bool) -> bool:
+    """Khoá byte đầu file; tiến trình chết (đóng cửa sổ, tắt máy) thì hệ điều hành tự nhả khoá."""
+    try:
+        if sys.platform == 'win32':
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_byte(fd: int) -> None:
+    try:
+        if sys.platform == 'win32':
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+def _read_queue() -> list:
+    try:
+        items = json.loads(QUEUE_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [i for i in items if isinstance(i, dict) and i.get('video') and i.get('srt')]
+
+
+class QueueEdit:
+    """with QueueEdit() as items: đọc-sửa-ghi hàng đợi dưới khoá, 2 cửa sổ cùng thêm video không ghi đè nhau."""
+
+    def __enter__(self) -> list:
+        QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(QUEUE_LOCK, os.O_RDWR | os.O_CREAT)
+        while not _lock_byte(self.fd, wait=True):
+            time.sleep(0.2)
+        self.items = _read_queue()
+        self.before = json.dumps(self.items)
+        return self.items
+
+    def __exit__(self, *exc) -> None:
+        try:
+            if exc[0] is None and json.dumps(self.items) != self.before:
+                _write_json_atomic(QUEUE_FILE, self.items)
+        finally:
+            _unlock_byte(self.fd)
+            os.close(self.fd)
+
+
+def job_key(video) -> str:
+    return os.path.normcase(os.path.abspath(str(video)))
+
+
+_runner_fd = None
+
+
+def take_runner_lock() -> bool:
+    """True = cửa sổ này là cửa sổ chạy hàng đợi (giữ khoá tới khi thoát)."""
+    global _runner_fd
+    if _runner_fd is not None:
+        return True
+    RUNNER_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(RUNNER_LOCK, os.O_RDWR | os.O_CREAT)
+    if _lock_byte(fd, wait=False):
+        _runner_fd = fd
+        return True
+    os.close(fd)
+    return False
+
+
+def release_runner_lock() -> None:
+    global _runner_fd
+    if _runner_fd is not None:
+        _unlock_byte(_runner_fd)
+        os.close(_runner_fd)
+        _runner_fd = None
+
+
+def split_dropped(raw: str) -> list:
+    """Kéo nhiều file vào cửa sổ cmd ra 1 dòng: "D:\\a b.mp4" D:\\c.srt ... (đường dẫn có dấu cách mới có ngoặc)."""
+    raw = raw.strip()
+    whole = raw.strip('"').strip("'")
+    if whole and Path(whole).expanduser().exists():
+        return [whole]
+    return [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', raw)]
+
+
+def sibling_sub(video: Path) -> Path | None:
+    for ext in SRT_EXTS:
+        path = video.with_suffix(ext)
+        if path.exists():
+            return path.resolve()
+    return None
+
+
+def pair_files(paths: list) -> list:
+    """Chia file thành video / phụ đề và ghép theo tên. Trả [[video, phụ đề hoặc None], ...]."""
+    videos, subs = [], []
+    for raw in paths:
+        path = Path(str(raw).strip('"').strip("'")).expanduser()
         if not path.exists():
+            print(f'   Không tìm thấy: {raw}')
             continue
-        if path.suffix.lower() in SRT_EXTS:
-            srt = srt or path.resolve()
-        elif path.suffix.lower() in VIDEO_EXTS:
-            video = video or path.resolve()
+        ext = path.suffix.lower()
+        if ext in SRT_EXTS:
+            subs.append(path.resolve())
+        elif ext in VIDEO_EXTS:
+            videos.append(path.resolve())
+        else:
+            print(f'   Bỏ qua "{path.name}": không phải video ({" ".join(VIDEO_EXTS)}) hay phụ đề')
+    pairs = []
+    for video in videos:
+        match = next((s for s in subs if s.stem.lower() == video.stem.lower()), None)
+        if match:
+            subs.remove(match)
+        pairs.append([video, match])
+    # 1 video + 1 phụ đề khác tên (cách dùng cũ) vẫn ghép với nhau
+    unmatched = [p for p in pairs if p[1] is None]
+    if len(unmatched) == 1 and len(subs) == 1:
+        unmatched[0][1] = subs.pop()
+    for sub in subs:
+        print(f'   Bỏ qua phụ đề "{sub.name}": không có video cùng tên đi kèm')
+    return pairs
 
-    print()
-    print('=' * 62)
-    print('   LỒNG TIẾNG HÀNG LOẠT — 1 video + 1 phụ đề  ->  25 ngôn ngữ')
-    print('=' * 62)
-    print('   Mẹo: kéo file từ Windows Explorer thả vào cửa sổ này rồi Enter')
-    print()
 
-    if video:
-        print(f'   Video   : {video}')
-    else:
-        video = ask_path('   Video gốc      : ', VIDEO_EXTS)
-    if srt:
-        print(f'   Phụ đề  : {srt}')
-    else:
-        srt = ask_path('   Phụ đề gốc .srt: ', SRT_EXTS)
-
-    codes = ', '.join(l['code'] for l in cfg.get('languages', []))
-    print()
-    print('   Chọn việc cần làm:')
-    print('     1) Xem trước kiểu chữ phụ đề  (nên làm trước lần đầu)')
-    print('     2) Chạy tất cả: dịch + lồng tiếng + nhúng phụ đề + render'
-          ' (kèm video gốc có phụ đề gốc)')
-    print('     3) Chỉ dịch phụ đề, chưa lồng tiếng')
-    print('     4) Chỉ làm vài ngôn ngữ do tôi chọn')
-    print('     0) Thoát')
-    print()
-    print(f'   ({len(cfg.get("languages", []))} ngôn ngữ trong cấu hình: {codes})')
-    print()
-
+def ask_langs(cfg: dict) -> str:
+    source_language = cfg.get('source_language', 'en')
+    valid = {l['code'] for l in cfg.get('languages', [])} | {source_language}
     while True:
-        choice = input('   Nhập số rồi Enter: ').strip()
-        if choice == '0':
-            sys.exit(0)
-        if choice in ('1', '2', '3', '4'):
-            break
-        print('   Chỉ nhập 0, 1, 2, 3 hoặc 4.')
+        raw = input(f'   Nhập mã ngôn ngữ, cách nhau dấu phẩy (vd: ar,fi,da — '
+                    f'thêm {source_language} để làm cả video gốc): ').strip()
+        codes = [c.strip() for c in raw.split(',') if c.strip()]
+        wrong = [c for c in codes if c not in valid]
+        if codes and not wrong:
+            return ','.join(codes)
+        print(f'   Mã không có trong cấu hình: {", ".join(wrong)}' if wrong else '   Chưa nhập mã nào.')
 
-    args.video, args.srt = str(video), str(srt)
-    if choice == '1':
-        args.preview_styles = True
-    elif choice == '3':
-        args.only = 'translate'
-    elif choice == '4':
-        source_language = cfg.get('source_language', 'en')
-        args.langs = input(f'   Nhập mã ngôn ngữ, cách nhau dấu phẩy (vd: ar,fi,da — '
-                           f'thêm {source_language} để làm cả video gốc): ').strip()
+
+def run_menu(args, cfg: dict) -> int:
+    """Hỏi các video + phụ đề + việc cần làm, xếp vào hàng đợi rồi chạy lần lượt."""
+    busy = not take_runner_lock()  # cửa sổ khác đang chạy hàng đợi
+    release_runner_lock()  # chưa chắc chạy (có thể chỉ xem trước kiểu chữ), lát nữa mới giữ khoá
+
     print()
-    return args
+    print('=' * 62)
+    print('   LỒNG TIẾNG HÀNG LOẠT — nhiều video, mỗi video 1 phụ đề -> 25 ngôn ngữ')
+    print('=' * 62)
+
+    # File kéo-thả thẳng lên file .bat (hoặc --video / --srt), tự phân loại theo đuôi file
+    dropped = [p for p in (*args.paths, args.video, args.srt) if p]
+    with QueueEdit() as queued:
+        if not busy:
+            for item in [i for i in queued if not Path(i['video']).exists() or not Path(i['srt']).exists()]:
+                print(f'   Bỏ khỏi hàng đợi (file đã bị xoá / đổi tên): {Path(item["video"]).name}')
+                queued.remove(item)
+        if queued and busy:
+            print('   Đang có cửa sổ LONG_TIENG khác chạy. Video thêm ở đây sẽ xếp hàng:')
+            print('   cửa sổ kia làm xong video hiện tại là tự làm tiếp, không cần chờ.')
+            print(f'   Hàng đợi hiện có {len(queued)} video (kể cả video đang làm):')
+            for i, item in enumerate(queued, 1):
+                print(f'     {i}. {Path(item["video"]).name}')
+        elif queued:
+            print(f'   Hàng đợi còn {len(queued)} video chưa xong từ lần trước:')
+            for i, item in enumerate(queued, 1):
+                print(f'     {i}. {Path(item["video"]).name}')
+            answer = input('   Làm tiếp các video này? (Enter = có, k = xoá khỏi hàng đợi): ').strip()
+            if answer.lower() in ('k', 'n', 'khong', 'không', 'no'):
+                queued.clear()
+                print('   Đã xoá hàng đợi cũ.')
+            elif answer:
+                dropped.extend(split_dropped(answer))  # kéo luôn video mới vào đây: vẫn làm tiếp + thêm
+        queued_keys = {job_key(i['video']) for i in queued}
+        resume = bool(queued) and not busy
+
+    jobs = []
+
+    def add(video: Path, srt: Path | None) -> None:
+        key = job_key(video)
+        if key in queued_keys or any(job_key(v) == key for v, _ in jobs):
+            print(f'   "{video.name}" đã có trong hàng đợi, bỏ qua.')
+            return
+        if srt is None:
+            default = sibling_sub(video)
+            hint = f' [Enter = {default.name}]' if default else ''
+            srt = ask_path(f'   Phụ đề gốc cho "{video.name}"{hint}: ', SRT_EXTS, default)
+        jobs.append((video, srt))
+        print(f'   + Video {len(jobs)}: {video.name}   (phụ đề: {srt.name})')
+
+    print()
+    for video, srt in pair_files(dropped):
+        add(video, srt)
+    print('   Kéo 1 hoặc nhiều video từ Windows Explorer thả vào cửa sổ này rồi Enter')
+    print('   (file .srt cùng tên với video được tự nhận, kéo kèm cũng được).')
+    print('   Thêm xong thì bấm Enter ở dòng trống để bắt đầu.')
+    print()
+    while True:
+        ready = bool(jobs) or resume
+        raw = input(f'   Video {len(jobs) + 1}' + (' (Enter = bắt đầu)' if ready else '') + ': ').strip()
+        if not raw:
+            if ready:
+                break
+            print('   Chưa có video nào. Kéo video vào đây, hoặc đóng cửa sổ để thoát.')
+            continue
+        pairs = pair_files(split_dropped(raw))
+        if not pairs:
+            print('   Chưa nhận được video nào từ dòng vừa nhập.')
+        for video, srt in pairs:
+            add(video, srt)
+
+    if jobs:
+        codes = ', '.join(l['code'] for l in cfg.get('languages', []))
+        print()
+        print(f'   Chọn việc cần làm cho {len(jobs)} video vừa thêm:')
+        print('     1) Xem trước kiểu chữ phụ đề  (nên làm trước lần đầu, dùng video đầu tiên)')
+        print('     2) Chạy tất cả: dịch + lồng tiếng + nhúng phụ đề + render'
+              ' (kèm video gốc có phụ đề gốc)')
+        print('     3) Chỉ dịch phụ đề, chưa lồng tiếng')
+        print('     4) Chỉ làm vài ngôn ngữ do tôi chọn')
+        print('     0) Thoát')
+        print()
+        print(f'   ({len(cfg.get("languages", []))} ngôn ngữ trong cấu hình: {codes})')
+        print()
+        while True:
+            choice = input('   Nhập số rồi Enter: ').strip()
+            if choice == '0':
+                sys.exit(0)
+            if choice in ('1', '2', '3', '4'):
+                break
+            print('   Chỉ nhập 0, 1, 2, 3 hoặc 4.')
+
+        if choice == '1':
+            args.video, args.srt = (str(p) for p in jobs[0])
+            args.preview_styles = True
+            print()
+            return run_one(args, cfg)
+        only = 'translate' if choice == '3' else None
+        langs = ask_langs(cfg) if choice == '4' else None
+        with QueueEdit() as items:
+            keys = {job_key(i['video']) for i in items}
+            for video, srt in jobs:
+                if job_key(video) not in keys:
+                    items.append({'video': str(video), 'srt': str(srt), 'only': only, 'langs': langs,
+                                  'added': time.strftime('%Y-%m-%d %H:%M:%S')})
+
+    if not take_runner_lock():
+        print()
+        print(f'   Đã thêm {len(jobs)} video vào hàng đợi. Cửa sổ LONG_TIENG đang chạy sẽ tự làm lần lượt')
+        print('   sau video hiện tại. Có thể đóng cửa sổ này.')
+        return 0
+    print()
+    return run_queue(args)
+
+
+def run_queue(args) -> int:
+    """Làm lần lượt từng video trong hàng đợi (đọc lại file sau mỗi video: video thêm giữa chừng vẫn được làm)."""
+    tried, done, failed = set(), [], []
+    stopped = False
+    try:
+        while True:
+            with QueueEdit() as items:
+                todo = [i for i in items if job_key(i['video']) not in tried]
+            if not todo:
+                break
+            job = todo[0]
+            key = job_key(job['video'])
+            tried.add(key)
+            name = Path(job['video']).name
+            print()
+            print('#' * 70)
+            print(f'   VIDEO {len(done) + len(failed) + 1}: {name}')
+            print(f'   Phụ đề: {job["srt"]}')
+            if len(todo) > 1:
+                print(f'   Sau video này còn {len(todo) - 1} video trong hàng đợi')
+            print('#' * 70)
+            if not Path(job['video']).exists() or not Path(job['srt']).exists():
+                print('   [LỖI] Không còn thấy video / phụ đề (đã xoá hoặc đổi tên) -> bỏ khỏi hàng đợi.')
+                with QueueEdit() as items:
+                    items[:] = [i for i in items if job_key(i['video']) != key]
+                failed.append(name)
+                continue
+            cmd = [sys.executable, str(Path(__file__).resolve()), '--config', str(args.config),
+                   '--video', job['video'], '--srt', job['srt']]
+            if job.get('langs'):
+                cmd += ['--langs', job['langs']]
+            if job.get('only'):
+                cmd += ['--only', job['only']]
+            proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR))
+            while True:
+                try:
+                    code = proc.wait()
+                    break
+                except KeyboardInterrupt:  # Ctrl+C tới cả tiến trình con: chờ nó ghi log [DỪNG] rồi thoát
+                    stopped = True
+            if stopped or code in STOPPED_CODES:
+                stopped = True
+                break
+            if code == 0:
+                done.append(name)
+                with QueueEdit() as items:
+                    items[:] = [i for i in items if job_key(i['video']) != key]
+            else:
+                failed.append(name)  # giữ trong hàng đợi: lần mở sau hỏi làm tiếp (phần đã xong tự bỏ qua)
+    except KeyboardInterrupt:
+        stopped = True
+    finally:
+        release_runner_lock()
+
+    with QueueEdit() as items:
+        left = len(items)
+    print()
+    print('#' * 70)
+    print(f'   HÀNG ĐỢI: xong {len(done)} video' + (f', lỗi {len(failed)} video' if failed else '')
+          + (' — ĐÃ DỪNG giữa chừng' if stopped else ''))
+    for name in done:
+        print(f'     [xong] {name}')
+    for name in failed:
+        print(f'     [lỗi]  {name}')
+    if left:
+        print(f'   Còn {left} video trong hàng đợi: mở lại LONG_TIENG.bat để làm tiếp.')
+    print('#' * 70)
+    if stopped:
+        return 130
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------------------
@@ -2307,8 +2590,12 @@ def main() -> int:
     cfg = load_config(Path(args.config))
 
     if args.menu or not (args.video and args.srt):
-        args = run_menu(args, cfg)
+        return run_menu(args, cfg)
+    return run_one(args, cfg)
 
+
+def run_one(args, cfg: dict) -> int:
+    """Làm 1 video (dịch + lồng tiếng + render) trong tiến trình này."""
     video = Path(args.video).expanduser().resolve()
     srt = Path(args.srt).expanduser().resolve()
     workdir = Path(args.workdir).expanduser().resolve() if args.workdir \

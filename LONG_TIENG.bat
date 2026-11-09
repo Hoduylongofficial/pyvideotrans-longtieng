@@ -1,10 +1,13 @@
 @echo off
 rem ===========================================================
-rem  LONG TIENG HANG LOAT - 1 video + 1 file .srt -> 25 ngon ngu
+rem  LONG TIENG HANG LOAT - nhieu video (moi video 1 file .srt) -> 25 ngon ngu
 rem
 rem  Cach dung:
-rem    - Bam dup vao file nay, roi keo tha video va file .srt vao
-rem    - Hoac keo thang video + file .srt tha len file .bat nay
+rem    - Bam dup vao file nay, roi keo tha 1 hoac nhieu video vao
+rem      (file .srt cung ten voi video duoc tu nhan)
+rem    - Hoac keo thang cac video + file .srt tha len file .bat nay
+rem    - Dang chay ma muon them video: mo them 1 cua so LONG_TIENG nua,
+rem      keo video vao -> video duoc xep hang, cua so dang chay tu lam tiep
 rem
 rem  Moi lan mo tu cap nhat len ban moi nhat tren GitHub (neu co).
 rem  Chinh giong doc / font / kenh dich: dub_all.config.json
